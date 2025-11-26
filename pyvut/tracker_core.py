@@ -3,6 +3,7 @@ import struct
 import numpy as np
 import time
 import json
+from pathlib import Path
 
 from enums_usb import *
 from enums_horusd_hid import *
@@ -128,7 +129,7 @@ class Ackable(object):
 
 class DongleHID(Ackable):
 
-    def __init__(self):
+    def __init__(self, wifi_info_path=None):
         self.calib_1 = ""
         self.calib_2 = ""
         self.device_macs = []
@@ -184,7 +185,8 @@ class DongleHID(Ackable):
         #print(self.send_cmd(DCMD_REQUEST_RF_CHANGE_BEHAVIOR, struct.pack("<B", RF_BEHAVIOR_FACTORY_RESET))) # FactoryReset?
         #print(self.send_cmd(DCMD_REQUEST_RF_CHANGE_BEHAVIOR, struct.pack("<BBBBBB", RF_BEHAVIOR_6, 1, 0, 0, 0, 0))) # ClearPairingInfo?
 
-        with open('wifi_info.json', 'r') as f:
+        wifi_path = Path(wifi_info_path) if wifi_info_path else Path(__file__).with_name('wifi_info.json')
+        with wifi_path.open('r', encoding='utf-8') as f:
             self.wifi_info = json.load(f)
 
     def parse_response(self, data):
@@ -491,7 +493,7 @@ class DongleHID(Ackable):
 
 class TrackerHID(Ackable):
 
-    def __init__(self):
+    def __init__(self, wifi_info_path=None):
         self.watchdog_delay = 0
         self.poses_recvd = 0
         self.pose_callback = None
@@ -518,7 +520,8 @@ class TrackerHID(Ackable):
         #self.set_tracking_mode(TRACKING_MODE_SLAM_HOST)
         self.set_power_pcvr(TRACKING_MODE_SLAM_HOST)
 
-        with open('wifi_info.json', 'r') as f:
+        wifi_path = Path(wifi_info_path) if wifi_info_path else Path(__file__).with_name('wifi_info.json')
+        with wifi_path.open('r', encoding='utf-8') as f:
             self.wifi_info = json.load(f)
 
         '''
@@ -661,11 +664,12 @@ class TrackerHID(Ackable):
 
 class ViveTrackerGroup():
 
-    def __init__(self, mode="DONGLE_USB"):
+    def __init__(self, mode="DONGLE_USB", wifi_info_path=None):
         self.poses_recvd = [0]*5
         self.pose_quat = [[0.0, 0.0, 0.0, 1.0]] * 5
         self.pose_pos = [[0.0, 0.0, 0.0]] * 5
         self.pose_time = [0] * 5
+        self.pose_tracking_status = [0] * 5
         self.pose_btns = [0]*5
         self.last_pose_btns = [0]*5
         #self.wip_pose_btns = [0]*5
@@ -677,16 +681,28 @@ class ViveTrackerGroup():
         self.bump_map_once = [True]*5
         self.bump_map_once_2 = [True]*5
 
+        self.pose_listeners = []
+
         # TODO: mix of multiple?
         if mode == "DONGLE_USB":
-            self.comms = DongleHID()
+            self.comms = DongleHID(wifi_info_path=wifi_info_path)
         elif mode == "TRACKER_USB":
-            self.comms = TrackerHID()
+            self.comms = TrackerHID(wifi_info_path=wifi_info_path)
 
         self.comms.pose_callback = self.parse_pose_data
         self.comms.ack_callback = self.parse_ack
-        self.comms.connect_callback = self.handle_connected
+        self.comms.connected_callback = self.handle_connected
         self.comms.disconnected_callback = self.handle_disconnected
+
+    def add_pose_listener(self, listener):
+        if listener not in self.pose_listeners:
+            self.pose_listeners.append(listener)
+
+    def remove_pose_listener(self, listener):
+        self.pose_listeners = [cb for cb in self.pose_listeners if cb != listener]
+
+    def clear_pose_listeners(self):
+        self.pose_listeners.clear()
 
     def handle_connected(self, comms, idx):
         pass
@@ -779,6 +795,7 @@ class ViveTrackerGroup():
         self.pose_quat[mac_to_idx(mac)] = rot_arr
         self.pose_pos[mac_to_idx(mac)] = pos_arr
         self.pose_time[mac_to_idx(mac)] = current_milli_time()
+        self.pose_tracking_status[mac_to_idx(mac)] = tracking_status
 
         if btns & 0x80:
             self.last_pose_btns[mac_to_idx(mac)] = self.pose_btns[mac_to_idx(mac)]
@@ -790,6 +807,17 @@ class ViveTrackerGroup():
         if (self.pose_btns[mac_to_idx(mac)] & 0x100) == 0x100 and (self.last_pose_btns[mac_to_idx(mac)] & 0x100) == 0x0:# and comms.get_map_state(mac) == MAP_EXIST:
             print("end map.")
             comms.lambda_end_map(mac)
+
+        self._emit_pose_event(
+            idx=idx,
+            mac=mac,
+            tracking_status=tracking_status,
+            buttons=self.pose_btns[mac_to_idx(mac)],
+            pos_arr=pos_arr,
+            rot_arr=rot_arr,
+            acc_arr=acc_arr,
+            rot_vel_arr=rot_vel_arr,
+        )
 
     def parse_ack(self, comms, device_addr, data_raw):
         data = data_raw.decode("utf-8")
@@ -947,8 +975,39 @@ class ViveTrackerGroup():
     def get_rot(self, idx=0):
         return np.array(self.pose_quat[idx])
 
+    def get_pose(self, idx=0):
+        return {
+            "position": np.array(self.pose_pos[idx], dtype=np.float32),
+            "rotation": np.array(self.pose_quat[idx], dtype=np.float32),
+            "buttons": int(self.pose_btns[idx]),
+            "tracking_status": int(self.pose_tracking_status[idx]),
+            "timestamp_ms": int(self.pose_time[idx]),
+        }
+
     def do_loop(self):
         self.comms.do_loop()
+
+    def _emit_pose_event(self, idx, mac, tracking_status, buttons, pos_arr, rot_arr, acc_arr, rot_vel_arr):
+        if not self.pose_listeners:
+            return
+
+        sample = {
+            "tracker_index": idx,
+            "mac": bytes(mac),
+            "buttons": buttons,
+            "tracking_status": tracking_status,
+            "timestamp_ms": self.pose_time[mac_to_idx(mac)],
+            "position": np.array(pos_arr, dtype=np.float32),
+            "rotation": np.array(rot_arr, dtype=np.float32),
+            "acceleration": np.array(acc_arr, dtype=np.float32),
+            "angular_velocity": np.array(rot_vel_arr, dtype=np.float32),
+        }
+
+        for listener in list(self.pose_listeners):
+            try:
+                listener(sample)
+            except Exception as exc:
+                print(f"Pose listener raised {exc}")
 
 if __name__ == '__main__':
     trackers = ViveTrackerGroup()

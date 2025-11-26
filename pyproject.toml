@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyvut"
+version = "0.1.0"
+description = "Python helpers for poking at the HTC VIVE Ultimate Tracker via HID and RF"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    { name = "nijkah" },
+    { name = "pitin" }
+]
+dependencies = [
+    "hid>=1.0.5",
+    "numpy>=1.21",
+]
+
+[project.optional-dependencies]
+visualizer = ["pygame>=2.5"]
+
+[project.urls]
+Homepage = "https://github.com/nijkah/pyvut"
+Source = "https://github.com/nijkah/pyvut"
+
+[tool.setuptools]
+packages = ["pyvut"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+pyvut = ["wifi_info.json"]
