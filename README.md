@@ -1,16 +1,29 @@
-# VIVE Ultimate Tracker Reverse Engineering
+# 6 DoF Tracking from the VIVE Ultimate Tracker without HMD on Ubuntu
 
-Practical notes for poking at HTC's VIVE Ultimate Trackers over USB HID and the wireless dongle. The repo contains low-level scripts, higher-level helpers, and a pygame visualizer for anyone exploring PCVR/SLAM behavior on Linux.
+This guide shows how to capture full 6DoF poses from HTC's VIVE Ultimate Trackers on Ubuntu using USB HID or the wireless dongle without owning the Vive HMD (Head Mounted Display).
 
-> **Acknowledgement:** This fork builds upon [`vive_ultimate_tracker_re`](https://github.com/shinyquagsire23/vive_ultimate_tracker_re) reverse-engineering work.
+**Acknowledgement:** This fork builds upon [`vive_ultimate_tracker_re`](https://github.com/shinyquagsire23/vive_ultimate_tracker_re) reverse-engineering work.
 
 ## Prerequisites
 
-- Hardware: at least one VIVE Ultimate Tracker; optional wireless dongle (preferred for multi-tracker work) or direct USB connection. Host PC must be able to talk to HID devices and, for map resets, provide `adb` access.
-- Software: Python 3.x plus the `hid`, `numpy`, and `pygame` packages (`pip install hid numpy pygame`).
+- **Hardware:** at least one VIVE Ultimate Tracker; optional wireless dongle (preferred for multi-tracker work) or direct USB connection. Host PC must be able to talk to HID devices and, for map resets, provide `adb` access.
+
+### Constructing map (SteamVR / VIVE) - only available on Windows
+
+Do the initial SLAM map construction on Windows with SteamVR + VIVE Streaming Hub; after the tracker stores the map, you can return to Ubuntu for everything else in this guide.
+
+1. Install SteamVR.
+2. Enable the SteamVR "null driver" (virtual headset) using [SteamVRNoHeadset](https://github.com/roivaz/SteamVRNoHeadset).
+3. Install the VIVE Streaming Hub from HTC's site.
+4. Follow the VIVE Streaming Hub instructions to create a new map; you can ignore the final step that asks for a SteamVR headset connection.
+5. Once your trackers indicate they are "ready" in Streaming Hub, verify any additional requirements from the sections below (Wi-Fi config, dongle pairing, etc.).
+
+### Software & configuration
+
+- Python 3.x plus the `hid`, `numpy`, and `pygame` packages (`pip install hid numpy pygame`).
 - HID dependency note: this code imports `hid` (not `hidapi`). On Debian/Ubuntu install `libhidapi-hidraw0` and `libhidapi-libusb0` (e.g., `sudo apt install libhidapi-hidraw0 libhidapi-libusb0`) before `pip install hid` so the native bindings build.
-- Permissions: Linux users may need udev rules so HID devices are accessible without `sudo`.
-- Wi-Fi setup: edit `pyvut/wifi_info.json` with the SSID, password, country, and frequency you want the SLAM host tracker to broadcast.
+- Permissions: Ubuntu users may need udev rules so HID devices are accessible without `sudo`; for quick tests you can run `sudo chmod a+r /dev/hidraw${NUM}` on the device path printed by `hid_test.py` or `rf_hid_test.py`.
+- Wi-Fi setup: edit `pyvut/wifi_info.json` with the SSID, password, country, and frequency you want the SLAM host tracker to broadcast; this step is required when you operate multiple trackers so they can sync over the host AP.
 
 ## Quick Start Cheatsheet
 
