@@ -2,6 +2,8 @@
 
 Practical notes for poking at HTC's VIVE Ultimate Trackers over USB HID and the wireless dongle. The repo contains low-level scripts, higher-level helpers, and a pygame visualizer for anyone exploring PCVR/SLAM behavior on Linux.
 
+> **Acknowledgement:** This fork builds upon [`vive_ultimate_tracker_re`](https://github.com/shinyquagsire23/vive_ultimate_tracker_re) reverse-engineering work.
+
 ## Prerequisites
 
 - Hardware: at least one VIVE Ultimate Tracker; optional wireless dongle (preferred for multi-tracker work) or direct USB connection. Host PC must be able to talk to HID devices and, for map resets, provide `adb` access.
