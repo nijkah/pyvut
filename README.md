@@ -1,4 +1,4 @@
-# 6 DoF Tracking from the VIVE Ultimate Tracker without HMD on Ubuntu
+# 6DoF tracking with the VIVE Ultimate Tracker on Ubuntu without an HMD
 
 This guide shows how to capture full 6DoF poses from HTC's VIVE Ultimate Trackers on Ubuntu using USB HID or the wireless dongle without owning the Vive HMD (Head Mounted Display).
 
