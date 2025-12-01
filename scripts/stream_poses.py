@@ -2,23 +2,35 @@
 """Simple demo that prints live 6DoF poses using pyvut's UltimateTrackerAPI."""
 
 import argparse
-import pathlib
-import sys
 import time
-
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+from math import asin, atan2, pi
 
 from pyvut import TrackerPose, UltimateTrackerAPI  # noqa: E402
 
+def quat_to_euler_deg(quat) -> tuple:
+    w, x, y, z = quat
+    t0 = +2.0 * (w * x + y * z)
+    t1 = +1.0 - 2.0 * (x * x + y * y)
+    roll = atan2(t0, t1)
+
+    t2 = +2.0 * (w * y - z * x)
+    t2 = max(min(t2, 1.0), -1.0)
+    pitch = asin(t2)
+
+    t3 = +2.0 * (w * z + x * y)
+    t4 = +1.0 - 2.0 * (y * y + z * z)
+    yaw = atan2(t3, t4)
+
+    return tuple(angle * 180.0 / pi for angle in (roll, pitch, yaw))
 
 def format_pose(pose: TrackerPose) -> str:
     pos = ", ".join(f"{axis: .3f}" for axis in pose.position)
     rot = ", ".join(f"{axis: .3f}" for axis in pose.rotation)
+    euler = ", ".join(f"{angle: .2f}" for angle in quat_to_euler_deg(pose.rotation))
     return (
         f"tracker={pose.tracker_index} mac={pose.mac} status={pose.tracking_status} "
-        f"pos=({pos}) rot=({rot}) buttons={pose.buttons:#06x}"
+        f"pos=({pos}) quat=({rot}) euler_deg=({euler}) buttons={pose.buttons:#06x}"
+        f" timestamp_ms={pose.timestamp_ms}"
     )
 
 
@@ -40,7 +52,10 @@ def main() -> None:
     def on_pose(pose: TrackerPose) -> None:
         print(format_pose(pose))
 
-    print("Starting UltimateTrackerAPI… Press Ctrl+C to stop.")
+    print(
+        "Starting UltimateTrackerAPI… Rotations are reported as quaternions (w,x,y,z) and Euler angles (roll, pitch, yaw in degrees)."
+        " Trackers emit raw (w,z,y,x) order but pyvut normalizes this for you. Press Ctrl+C to stop."
+    )
     try:
         with UltimateTrackerAPI(mode=args.mode, wifi_info_path=args.wifi_info) as api:
             api.add_pose_callback(on_pose)

@@ -3,16 +3,43 @@ import struct
 import numpy as np
 import time
 import json
+import logging
+from builtins import print as _builtin_print
 from pathlib import Path
 
-from enums_usb import *
-from enums_horusd_hid import *
-from enums_horusd_wifi import * # currently unused
-from enums_horusd_misc import * # currently unused
-from enums_horusd_status import *
-from enums_horusd_rf_report import *
-from enums_horusd_ack import *
-from enums_horusd_dongle import *
+from .enums_usb import *
+from .enums_horusd_hid import *
+from .enums_horusd_wifi import * # currently unused
+from .enums_horusd_misc import * # currently unused
+from .enums_horusd_status import *
+from .enums_horusd_rf_report import *
+from .enums_horusd_ack import *
+from .enums_horusd_dongle import *
+
+
+logger = logging.getLogger(__name__)
+_VERBOSE_PRINTS = True
+
+
+def set_tracker_core_verbose(enabled: bool) -> None:
+    """Globally enable/disable verbose logging for tracker_core."""
+
+    global _VERBOSE_PRINTS
+    _VERBOSE_PRINTS = enabled
+
+
+def verbose_print(*args, **kwargs):
+    if _VERBOSE_PRINTS:
+        _builtin_print(*args, **kwargs)
+        return
+
+    sep = kwargs.get("sep", " ")
+    end = kwargs.get("end", "\n")
+    try:
+        message = sep.join(str(arg) for arg in args) + end.rstrip("\n")
+    except Exception:
+        message = "<unprintable message>"
+    logger.debug(message)
 
 # Sometimes it will not track w/o:
 # adb shell setprop persist.lambda.trans_setup 1
@@ -46,10 +73,10 @@ def hex_dump(b, prefix=""):
     b = bytes(b)
     for i in range(0, len(b)):
         if i != 0 and i % 16 == 0:
-            print (p)
+            verbose_print(p)
             p = prefix
         p += ("%02x " % b[i])
-    print (p)
+    verbose_print(p)
 
 def mac_str(b):
     return hex(b[0])[2:] + ":" + hex(b[1])[2:] + ":" + hex(b[2])[2:] + ":" + hex(b[3])[2:] + ":" + hex(b[4])[2:] + ":" + hex(b[5])[2:] 
@@ -72,7 +99,7 @@ class Ackable(object):
         self.send_ack_to(mac_to_idx(device_addr), ACK_END_MAP)
 
     def send_ack_to(self, idx, ack):
-        print("UNIMPLEMENTED")
+        verbose_print("UNIMPLEMENTED")
 
     def send_ack_to_all(self, ack):
         for i in range(0, 5):
@@ -85,10 +112,10 @@ class Ackable(object):
     #    self.send_ack_to(idx, f"{ACK_WIFI_SSID_PASS}{ssid},{passwd}")
 
     def wifi_set_ssid(self, idx, ssid):
-        print(ssid[:8])
+        verbose_print(ssid[:8])
         self._wifi_set_ssid_full(idx, ssid[:8])
         for i in range(8, len(ssid), 8):
-            print(ssid[i:i+8])
+            verbose_print(ssid[i:i+8])
             self._wifi_set_ssid_append(idx, ssid[i:i+8])
 
     def _wifi_set_ssid_full(self, idx, ssid):
@@ -155,35 +182,35 @@ class DongleHID(Ackable):
         self.host_freq = ""
 
         device_list = hid.enumerate(VID_VIVE, PID_DONGLE)
-        print(device_list)
+        verbose_print(device_list)
 
         # TODO better error handling
         device_dict_hid1 = [device for device in device_list if device['interface_number'] == HID1_INTERFACE_NUM][0]
         self.device_hid1 = hid.Device(path=device_dict_hid1['path'])
 
-        print(self.get_PCBID()) # RequestPCBID
-        print(self.get_SKUID()) # RequestSKUID
-        print(self.get_SN()) # RequestSN
-        print(self.get_ShipSN()) # RequestShipSN
-        print(self.get_CapFPC()) # RequestCapFPC
-        print(self.get_ROMVersion()) # QueryROMVersion
+        verbose_print(self.get_PCBID()) # RequestPCBID
+        verbose_print(self.get_SKUID()) # RequestSKUID
+        verbose_print(self.get_SN()) # RequestSN
+        verbose_print(self.get_ShipSN()) # RequestShipSN
+        verbose_print(self.get_CapFPC()) # RequestCapFPC
+        verbose_print(self.get_ROMVersion()) # QueryROMVersion
 
-        #print(self.send_cmd(0xEF, bytes([0x06]) + "800001FF".encode("utf-8"))) # Write PCB ID
-        #print(self.send_cmd(0xEF, bytes([0x07]) + "00059E00".encode("utf-8"))) # Write SKU ID
-        #print(self.send_cmd(0xEF, bytes([0x08]) + "43AD339B07725".encode("utf-8"))) # Write SN
-        #print(self.send_cmd(0xEF, bytes([0x09]) + "FA3983C06815".encode("utf-8"))) # Write Ship SN
+        #verbose_print(self.send_cmd(0xEF, bytes([0x06]) + "800001FF".encode("utf-8"))) # Write PCB ID
+        #verbose_print(self.send_cmd(0xEF, bytes([0x07]) + "00059E00".encode("utf-8"))) # Write SKU ID
+        #verbose_print(self.send_cmd(0xEF, bytes([0x08]) + "43AD339B07725".encode("utf-8"))) # Write SN
+        #verbose_print(self.send_cmd(0xEF, bytes([0x09]) + "FA3983C06815".encode("utf-8"))) # Write Ship SN
 
         # hex_dump(self.send_cmd(0x21, [0])) # bricked my dongle :(
 
         # 0x1D = ReportRequestRFChangeBehavior?
         bEnabled = 1
-        print(self.send_cmd(DCMD_REQUEST_RF_CHANGE_BEHAVIOR, struct.pack("<BBBBBBB", RF_BEHAVIOR_PAIR_DEVICE, bEnabled, 1, 1, 1, 0, 0))) # PairDevice
-        #print(self.send_cmd(DCMD_REQUEST_RF_CHANGE_BEHAVIOR, struct.pack("<BBBBBBB", RF_BEHAVIOR_RX_POWER_SAVING, bEnabled, 1, 0, 0, 0, 0))) # RxPowerSaving?
-        #print(self.send_cmd(DCMD_REQUEST_RF_CHANGE_BEHAVIOR, struct.pack("<BBBBBB", RF_BEHAVIOR_RESTART_RF, 1, 0, 0, 0, 0))) # Same as 1 w/ bEnabled
+        verbose_print(self.send_cmd(DCMD_REQUEST_RF_CHANGE_BEHAVIOR, struct.pack("<BBBBBBB", RF_BEHAVIOR_PAIR_DEVICE, bEnabled, 1, 1, 1, 0, 0))) # PairDevice
+        #verbose_print(self.send_cmd(DCMD_REQUEST_RF_CHANGE_BEHAVIOR, struct.pack("<BBBBBBB", RF_BEHAVIOR_RX_POWER_SAVING, bEnabled, 1, 0, 0, 0, 0))) # RxPowerSaving?
+        #verbose_print(self.send_cmd(DCMD_REQUEST_RF_CHANGE_BEHAVIOR, struct.pack("<BBBBBB", RF_BEHAVIOR_RESTART_RF, 1, 0, 0, 0, 0))) # Same as 1 w/ bEnabled
         # 3 = SetLpf (7,8,9,10), not available
         # what is 4?
-        #print(self.send_cmd(DCMD_REQUEST_RF_CHANGE_BEHAVIOR, struct.pack("<B", RF_BEHAVIOR_FACTORY_RESET))) # FactoryReset?
-        #print(self.send_cmd(DCMD_REQUEST_RF_CHANGE_BEHAVIOR, struct.pack("<BBBBBB", RF_BEHAVIOR_6, 1, 0, 0, 0, 0))) # ClearPairingInfo?
+        #verbose_print(self.send_cmd(DCMD_REQUEST_RF_CHANGE_BEHAVIOR, struct.pack("<B", RF_BEHAVIOR_FACTORY_RESET))) # FactoryReset?
+        #verbose_print(self.send_cmd(DCMD_REQUEST_RF_CHANGE_BEHAVIOR, struct.pack("<BBBBBB", RF_BEHAVIOR_6, 1, 0, 0, 0, 0))) # ClearPairingInfo?
 
         wifi_path = Path(wifi_info_path) if wifi_info_path else Path(__file__).with_name('wifi_info.json')
         with wifi_path.open('r', encoding='utf-8') as f:
@@ -191,28 +218,28 @@ class DongleHID(Ackable):
 
     def parse_response(self, data):
         err_ret, cmd_id, data_len, unk2 = struct.unpack("<BBBH", data[:5])
-        #print(f"unk: {hex(unk)} cmd_id: {hex(cmd_id)} data_len: {hex(data_len)} unk2: {hex(unk2)} ")
+        #verbose_print(f"unk: {hex(unk)} cmd_id: {hex(cmd_id)} data_len: {hex(data_len)} unk2: {hex(unk2)} ")
 
         ret = data[5:5+data_len-4]
         return err_ret, cmd_id, ret
 
     def parse_incoming(self, data):
         cmd_id, data_len, unk = struct.unpack("<BBH", data[:4])
-        #print(f"unk: {hex(unk)} cmd_id: {hex(cmd_id)} data_len: {hex(data_len)} unk2: {hex(unk2)} ")
+        #verbose_print(f"unk: {hex(unk)} cmd_id: {hex(cmd_id)} data_len: {hex(data_len)} unk2: {hex(unk2)} ")
 
         ret = data[4:4+data_len-4]
         return cmd_id, ret
 
     def parse_tracker_status(self, data):
         unk, data_len = struct.unpack("<BB", data[:2])
-        #print(f"unk: {hex(unk)} data_len: {hex(data_len)}")
+        #verbose_print(f"unk: {hex(unk)} data_len: {hex(data_len)}")
         hex_dump(data[:2])
         data = data[2:2+data_len]
         hex_dump(data[0:1])
         data = data[1:]
         pair_state = [0,0,0,0,0]
         unk, pair_state[0],pair_state[1],pair_state[2],pair_state[3],pair_state[4],  = struct.unpack("<HLLLLL", data)
-        print(hex(unk),hex(pair_state[0]),hex(pair_state[1]),hex(pair_state[2]),hex(pair_state[3]),hex(pair_state[4]))
+        verbose_print(hex(unk),hex(pair_state[0]),hex(pair_state[1]),hex(pair_state[2]),hex(pair_state[3]),hex(pair_state[4]))
 
         self.pair_state = pair_state
 
@@ -236,7 +263,7 @@ class DongleHID(Ackable):
 
         if pad:
             out += bytes([0x0] * (0x40 - len(out)))
-        #print("Sending raw:")
+        #verbose_print("Sending raw:")
         #hex_dump(out)
 
         try:
@@ -261,7 +288,7 @@ class DongleHID(Ackable):
 
         out += bytes([0x0] * (0x41 - len(out)))
 
-        #print(f"Sending idk:")
+        #verbose_print(f"Sending idk:")
         #hex_dump(out)
 
         try:
@@ -272,7 +299,7 @@ class DongleHID(Ackable):
                 err_ret, cmd_ret, data_ret = self.parse_response(resp)
                 #hex_dump(data_ret)
                 if err_ret:
-                    print(f"Got error response: {hex(err_ret)}")
+                    verbose_print(f"Got error response: {hex(err_ret)}")
                 if cmd_ret == cmd_id:
                     return data_ret
         except:
@@ -310,7 +337,7 @@ class DongleHID(Ackable):
     def parse_tracker_incoming(self, resp):
         cmd_id, pkt_idx, device_addr, type_maybe, data_len = struct.unpack("<BH6sHB", resp[:0xC])
         #hex_dump(resp)
-        #print(hex(cmd_id), hex(pkt_idx), mac_str(device_addr), hex(type_maybe), "data_len:", hex(data_len))
+        #verbose_print(hex(cmd_id), hex(pkt_idx), mac_str(device_addr), hex(type_maybe), "data_len:", hex(data_len))
 
         if type_maybe == 0x101:
             data_raw = resp[0xC:0xC+data_len]
@@ -327,7 +354,7 @@ class DongleHID(Ackable):
         data = resp[0xC:0xC+data_len]
         data_id = data[0]
         data_real = data[1:]
-        print("   data_id:", hex(data_id), "data:", data_real)
+        verbose_print("   data_id:", hex(data_id), "data:", data_real)
 
     def get_PCBID(self):
         return self.send_cmd(DCMD_GET_CR_ID, [CR_ID_PCBID]).decode("utf-8")
@@ -379,13 +406,13 @@ class DongleHID(Ackable):
         resp = self.device_hid1.read(0x400)
         if len(resp) <= 0:
             return
-        #print("dump:")
+        #verbose_print("dump:")
         #hex_dump(resp)
-        #print("parsed:")
+        #verbose_print("parsed:")
         # 0x18 = paired event, gives the 
         if resp[0] == DRESP_PAIR_EVENT:
             self.got_a_pair = True
-            #print("dump:")
+            #verbose_print("dump:")
             #hex_dump(resp)
             cmd_ret, data_ret = self.parse_incoming(resp)
             #hex_dump(data_ret)
@@ -396,8 +423,8 @@ class DongleHID(Ackable):
             if paired_mac not in self.device_macs:
                 self.device_macs += [paired_mac]
                 self.num_paired += 1
-            print(("Unpaired" if is_unpair else "Paired") + f" {paired_mac_str}, {hex(unk)}")
-            #print(self.device_macs)
+            verbose_print(("Unpaired" if is_unpair else "Paired") + f" {paired_mac_str}, {hex(unk)}")
+            #verbose_print(self.device_macs)
             self.calib_1 = ""
             self.calib_2 = ""
 
@@ -416,7 +443,7 @@ class DongleHID(Ackable):
             if self.current_host_id == -1 or self.is_host(paired_mac):
                 test_mode = TRACKING_MODE_SLAM_HOST
                 self.current_host_id = mac_to_idx(paired_mac)
-                print(f"Making {paired_mac_str} the SLAM host")
+                verbose_print(f"Making {paired_mac_str} the SLAM host")
                 self.wifi_set_country(mac_to_idx(paired_mac), self.wifi_info["country"])
                 self.ack_set_tracking_host(mac_to_idx(paired_mac), 1)
                 self.ack_set_wifi_host(mac_to_idx(paired_mac), 1)
@@ -434,7 +461,7 @@ class DongleHID(Ackable):
 
             
         elif resp[0] == DRESP_TRACKER_RF_STATUS or resp[0] == DRESP_TRACKER_NEW_RF_STATUS or resp[0] == 0x29:
-            print(f"dump for {hex(resp[0])}:")
+            verbose_print(f"dump for {hex(resp[0])}:")
             #hex_dump(resp)
             cmd_ret, data_ret = self.parse_incoming(resp)
             if resp[0] == DRESP_TRACKER_RF_STATUS or resp[0] == DRESP_TRACKER_NEW_RF_STATUS:
@@ -457,7 +484,7 @@ class DongleHID(Ackable):
             
             self.tick_periodic += 1
             if self.tick_periodic > 1000:
-                print("Tick!")
+                verbose_print("Tick!")
                 #self.send_ack_to_all(ACK_LAMBDA_MESSAGE + "1:0")
                 
 
@@ -488,7 +515,7 @@ class DongleHID(Ackable):
                 self.tick_periodic = 0
             #self.send_ack_to_all(ACK_LAMBDA_MESSAGE)
         else:
-            print("dump:")
+            verbose_print("dump:")
             hex_dump(resp)
 
 class TrackerHID(Ackable):
@@ -504,7 +531,7 @@ class TrackerHID(Ackable):
         self.device_addr = bytes([0]*6)
 
         device_list = hid.enumerate(VID_VIVE, PID_TRACKER)
-        print(device_list)
+        verbose_print(device_list)
 
         #Find the device with the particular usage you want
         device_dict_hid1 = [device for device in device_list if device['interface_number'] == HID1_INTERFACE_NUM][0]
@@ -535,7 +562,7 @@ class TrackerHID(Ackable):
 
     def parse_response(self, data):
         unk, cmd_id, data_len, unk2 = struct.unpack("<BHBB", data[:5])
-        #print(f"unk: {hex(unk)} cmd_id: {hex(cmd_id)} data_len: {hex(data_len)} unk2: {hex(unk2)} ")
+        #verbose_print(f"unk: {hex(unk)} cmd_id: {hex(cmd_id)} data_len: {hex(data_len)} unk2: {hex(unk2)} ")
 
         ret = data[5:5+data_len]
         return cmd_id, ret
@@ -585,7 +612,7 @@ class TrackerHID(Ackable):
     def get_status(self):
         ret = self.send_command(PACKET_GET_STATUS)
         tracking_mode, power, batt, hmd_init, device_status_mask, btn = struct.unpack("<BBBBBL", ret)
-        print(f"tracking_mode={tracking_mode}, power={power}, batt={batt}, hmd_init={hmd_init}, device_status_mask={hex(device_status_mask)}, btn={hex(btn)}")
+        verbose_print(f"tracking_mode={tracking_mode}, power={power}, batt={batt}, hmd_init={hmd_init}, device_status_mask={hex(device_status_mask)}, btn={hex(btn)}")
 
     def set_tracking_mode(self, mode):
         self.send_command(PACKET_SET_TRACKING_MODE, [mode & 0xFF])
@@ -606,14 +633,14 @@ class TrackerHID(Ackable):
             return
         unk0, pkt_idx, mask, hmd_us, hdcc_status0, hdcc_status1, ack_in_queue, device_status, unk3 = struct.unpack("<BHLQBBBL17s", resp[:0x27])
         #hex_dump(resp)
-        print(unk0, pkt_idx, hex(mask), hmd_us, hex(hdcc_status0), hex(hdcc_status1), ack_in_queue, hex(device_status), unk3)
+        verbose_print(unk0, pkt_idx, hex(mask), hmd_us, hex(hdcc_status0), hex(hdcc_status1), ack_in_queue, hex(device_status), unk3)
 
         for i in range(0, 7):
             pose_len = resp[0x27 + (0x61*i)]
             pose_data = resp[0x28 + (0x61*i) : 0x28 + (0x61*i) + pose_len]
             pose_timestamp, = struct.unpack("<Q", resp[0x27 + (0x61*i) + 0x59 : 0x27 + (0x61*i) + 0x59 + 0x8])
             if pose_len:
-                print("Pose data", i, "len", hex(pose_len), "ts", pose_timestamp)
+                verbose_print("Pose data", i, "len", hex(pose_len), "ts", pose_timestamp)
                 #hex_dump(pose_data)
                 if self.pose_callback:
                     self.pose_callback(self, self.device_addr, pose_data)
@@ -621,9 +648,9 @@ class TrackerHID(Ackable):
         for i in range(0, 7):
             a,b = struct.unpack("<QQ", resp[0x2ce+(i*0x10):0x2ce+(i*0x10)+0x10])
             netsync_str += f"({a},{b}) "
-        print(netsync_str)
-        print("")
-        print("")
+        verbose_print(netsync_str)
+        verbose_print("")
+        verbose_print("")
 
     # 1=gyro, 2=body tracking(?), 3=body?
     def set_power_pcvr(self, mode):
@@ -664,7 +691,8 @@ class TrackerHID(Ackable):
 
 class ViveTrackerGroup():
 
-    def __init__(self, mode="DONGLE_USB", wifi_info_path=None):
+    def __init__(self, mode="DONGLE_USB", wifi_info_path=None, debug=True):
+        set_tracker_core_verbose(debug)
         self.poses_recvd = [0]*5
         self.pose_quat = [[0.0, 0.0, 0.0, 1.0]] * 5
         self.pose_pos = [[0.0, 0.0, 0.0]] * 5
@@ -682,6 +710,7 @@ class ViveTrackerGroup():
         self.bump_map_once_2 = [True]*5
 
         self.pose_listeners = []
+        self._active_tracker_slots = []
 
         # TODO: mix of multiple?
         if mode == "DONGLE_USB":
@@ -717,13 +746,15 @@ class ViveTrackerGroup():
         self.stuck_on_not_checked[idx] = 0
         self.bump_map_once[idx] = True
         self.bump_map_once_2[idx] = True
+        if idx in self._active_tracker_slots:
+            self._active_tracker_slots.remove(idx)
 
     # TODO: comms -> self
     def handle_map_state(self, comms, device_addr, state):
         self.tracker_map_state[mac_to_idx(device_addr)] = state
 
         if self.stuck_on_static[mac_to_idx(device_addr)] > 7:
-            print("ok we're stuck, end the map again")
+            verbose_print("ok we're stuck, end the map again")
             self.bump_map_once_2[mac_to_idx(device_addr)] = True
             self.stuck_on_static[mac_to_idx(device_addr)] = 0
 
@@ -738,7 +769,7 @@ class ViveTrackerGroup():
             self.stuck_on_static[mac_to_idx(device_addr)] += 1
             if self.bump_map_once_2[mac_to_idx(device_addr)]:
                 if comms.is_client(device_addr):
-                    print("End the map?")
+                    verbose_print("End the map?")
                     #comms.lambda_end_map(comms.current_host_id)
                     #comms.lambda_end_map(device_addr)
                     #comms.send_ack_to(comms.current_host_id, ACK_LAMBDA_COMMAND + f"{ASK_MAP}")
@@ -752,7 +783,7 @@ class ViveTrackerGroup():
 
         if state == MAP_EXIST:
             if self.stuck_on_exists[mac_to_idx(device_addr)] == 0:# and comms.is_host(device_addr):
-                print("ok we're stuck on exists, end the map again")
+                verbose_print("ok we're stuck on exists, end the map again")
                 #comms.lambda_end_map(device_addr)
             self.stuck_on_exists[mac_to_idx(device_addr)] += 1
         else:
@@ -760,23 +791,23 @@ class ViveTrackerGroup():
 
         if state == MAP_NOT_CHECKED:
             if self.stuck_on_not_checked[mac_to_idx(device_addr)] == 0 and comms.is_client(device_addr) and comms.client_has_host_map(device_addr):
-                print("ok we're stuck on not checked, end the map again")
+                verbose_print("ok we're stuck on not checked, end the map again")
                 comms.lambda_end_map(device_addr)
             self.stuck_on_not_checked[mac_to_idx(device_addr)] += 1
         else:
             self.stuck_on_not_checked[mac_to_idx(device_addr)] = 0
 
     def parse_pose_data(self, comms, mac, data):
-        #print(comms, self)
+        #verbose_print(comms, self)
         self.poses_recvd[mac_to_idx(mac)] += 1
 
         if len(data) == 0x2:
             idx, btns = struct.unpack("<BB", data)
-            print(f"({mac_str(mac)})", hex(idx), "btns:", hex(btns))
+            verbose_print(f"({mac_str(mac)})", hex(idx), "btns:", hex(btns))
             return
 
         if len(data) != 0x25 and len(data) != 0x27:
-            print("Weird pose data.", len(data))
+            verbose_print("Weird pose data.", len(data))
             hex_dump(data)
             return
         idx, btns, pos, rot, acc, rot_vel, tracking_status = struct.unpack("<BB12s8s6s8sB", data[:0x25])
@@ -787,11 +818,13 @@ class ViveTrackerGroup():
 
         pos_arr = np.frombuffer(pos, dtype=np.float32, count=3)
         rot_arr = np.frombuffer(rot, dtype=np.float16, count=4)
+        # Tracker firmware emits quaternions in [w, z, y, x]; convert to [w, x, y, z]
+        rot_arr = np.array([rot_arr[0], rot_arr[3], rot_arr[2], rot_arr[1]], dtype=np.float32)
         acc_arr = np.frombuffer(acc, dtype=np.float16, count=3)
         rot_vel_arr = np.frombuffer(rot_vel, dtype=np.float16, count=4)
-        #print(f"({mac_str(mac)})", hex(idx), pose_status_to_str(tracking_status), "btns:", hex(btns), "pos:", pos_arr, "rot:", rot_arr, "acc:", acc_arr, "rot_vel:", rot_vel_arr, "time_delta", current_milli_time() - self.pose_time[mac_to_idx(mac)])
+        #verbose_print(f"({mac_str(mac)})", hex(idx), pose_status_to_str(tracking_status), "btns:", hex(btns), "pos:", pos_arr, "rot:", rot_arr, "acc:", acc_arr, "rot_vel:", rot_vel_arr, "time_delta", current_milli_time() - self.pose_time[mac_to_idx(mac)])
 
-        #print(hex(idx), hex(btns), hex(self.pose_btns[mac_to_idx(mac)]), hex(self.last_pose_btns[mac_to_idx(mac)]))
+        #verbose_print(hex(idx), hex(btns), hex(self.pose_btns[mac_to_idx(mac)]), hex(self.last_pose_btns[mac_to_idx(mac)]))
         self.pose_quat[mac_to_idx(mac)] = rot_arr
         self.pose_pos[mac_to_idx(mac)] = pos_arr
         self.pose_time[mac_to_idx(mac)] = current_milli_time()
@@ -805,7 +838,7 @@ class ViveTrackerGroup():
             self.pose_btns[mac_to_idx(mac)] = btns | self.pose_btns[mac_to_idx(mac)] & 0xFF00
 
         if (self.pose_btns[mac_to_idx(mac)] & 0x100) == 0x100 and (self.last_pose_btns[mac_to_idx(mac)] & 0x100) == 0x0:# and comms.get_map_state(mac) == MAP_EXIST:
-            print("end map.")
+            verbose_print("end map.")
             comms.lambda_end_map(mac)
 
         self._emit_pose_event(
@@ -824,14 +857,14 @@ class ViveTrackerGroup():
         if data[0:1] == ACK_CATEGORY_CALIB_1:
             data_real = data[1:]
             comms.calib_1 += data_real
-            print(f"   Got CALIB_1 ({mac_str(device_addr)}):", comms.calib_1)
+            verbose_print(f"   Got CALIB_1 ({mac_str(device_addr)}):", comms.calib_1)
         elif data[0:1] == ACK_CATEGORY_CALIB_2:
             data_real = data[1:]
             comms.calib_2 += data_real
-            print(f"   Got CALIB_2 ({mac_str(device_addr)}):", comms.calib_2)
+            verbose_print(f"   Got CALIB_2 ({mac_str(device_addr)}):", comms.calib_2)
         elif data[0:1] == ACK_CATEGORY_DEVICE_INFO:
             data_real = data[1:]
-            print(f"   Got device info ACK ({mac_str(device_addr)}):", data_real[:3])
+            verbose_print(f"   Got device info ACK ({mac_str(device_addr)}):", data_real[:3])
 
             # Handle post-deviceinfo commands
             if data_real[0:3] == ACK_AZZ:
@@ -861,7 +894,7 @@ class ViveTrackerGroup():
                     pass
                 elif key_id == KEY_RECEIVED_HOST_MAP:
                     if state == 0 and (current_milli_time() - comms.last_host_map_ask_ms) > 10000 and comms.is_client_connected(device_addr):
-                        print("ask for map again")
+                        verbose_print("ask for map again")
                         comms.last_host_map_ask_ms = current_milli_time()
                         #comms.send_ack_to(mac_to_idx(device_addr), ACK_LAMBDA_COMMAND + f"{RESET_MAP}")
                         #comms.send_ack_to(comms.current_host_id, ACK_LAMBDA_COMMAND + f"{ASK_MAP}") # doesn't work?
@@ -891,20 +924,20 @@ class ViveTrackerGroup():
                 elif key_id == KEY_CURRENT_TRACKING_STATE:
                     addendum = f"({pose_status_to_str(state)})"
 
-                print(f"   Status returned for SLAM key {slam_key_to_str(key_id)} ({mac_str(device_addr)}): {state} {addendum}")
+                verbose_print(f"   Status returned for SLAM key {slam_key_to_str(key_id)} ({mac_str(device_addr)}): {state} {addendum}")
 
             else:
-                print(f"   Got PLAYER ACK ({mac_str(device_addr)}):", f"CMD{idx}", args)
+                verbose_print(f"   Got PLAYER ACK ({mac_str(device_addr)}):", f"CMD{idx}", args)
         elif data[0:2] == ACK_LAMBDA_PROPERTY:
             data_real = data[2:]
-            print(f"   Got LP ACK ({mac_str(device_addr)}):", data_real)
+            verbose_print(f"   Got LP ACK ({mac_str(device_addr)}):", data_real)
         elif data[0:2] == ACK_LAMBDA_STATUS:
             data_real = data[2:]
             a, b, c = [int(s) for s in data_real.split(",")]
-            print(f"   Got LAMBDA_STATUS ACK ({mac_str(device_addr)}): {a},{b},{c}")
+            verbose_print(f"   Got LAMBDA_STATUS ACK ({mac_str(device_addr)}): {a},{b},{c}")
             comms.send_ack_to_all(ACK_FW + "0")
             if b != 2:
-                #print("ask for host map.")
+                #verbose_print("ask for host map.")
                 #comms.send_ack_to(mac_to_idx(device_addr), ACK_LAMBDA_COMMAND + f"{ASK_ED}")
                 #comms.send_ack_to(mac_to_idx(device_addr), ACK_LAMBDA_COMMAND + f"{ASK_MAP}")
                 #comms.send_ack_to(mac_to_idx(device_addr), ACK_LAMBDA_COMMAND + f"{KF_SYNC}")
@@ -912,17 +945,17 @@ class ViveTrackerGroup():
                 
         elif data[0:4] == ACK_ERROR_CODE:
             data_real = data[4:]
-            print(f"   Got ERROR ({mac_str(device_addr)}):", data_real)
+            verbose_print(f"   Got ERROR ({mac_str(device_addr)}):", data_real)
         elif data[0:2] == ACK_WIFI_HOST_SSID:
             data_real = data[2:]
             ssid, passwd, freq = data_real.split(",")
-            print(f"   Got WIFI_HOST_SSID ACK ({mac_str(device_addr)}): ssid={ssid}, pass={passwd}, freq={freq}")
+            verbose_print(f"   Got WIFI_HOST_SSID ACK ({mac_str(device_addr)}): ssid={ssid}, pass={passwd}, freq={freq}")
 
             comms.host_ssid = ssid
             comms.host_passwd = passwd
             comms.host_freq = freq
         elif data[0:2] == ACK_WIFI_SSID_PASS:
-            print(f"   Got WIFI_SSID ACK ({mac_str(device_addr)})")
+            verbose_print(f"   Got WIFI_SSID ACK ({mac_str(device_addr)})")
 
             comms.wifi_set_ssid(mac_to_idx(device_addr), comms.host_ssid)
             comms.wifi_set_password(mac_to_idx(device_addr), comms.host_passwd)
@@ -931,7 +964,7 @@ class ViveTrackerGroup():
             comms.wifi_set_country(mac_to_idx(device_addr), comms.wifi_info["country"])
         elif data[0:2] == ACK_WIFI_CONNECT:
             ret = int(data[2:])
-            print(f"   Got WIFI_CONNECT ACK ({mac_str(device_addr)}): {ret}")
+            verbose_print(f"   Got WIFI_CONNECT ACK ({mac_str(device_addr)}): {ret}")
             comms.connected_to_host[mac_to_idx(device_addr)] = (ret > 0)
             
 
@@ -941,7 +974,7 @@ class ViveTrackerGroup():
 
             self.handle_map_state(comms, device_addr, status[1])
 
-            print(f"   Got MAP_STATUS ({mac_str(device_addr)}):", status, f"({map_status_to_str(status[1])})")
+            verbose_print(f"   Got MAP_STATUS ({mac_str(device_addr)}):", status, f"({map_status_to_str(status[1])})")
             #comms.send_ack_to_all(ACK_END_MAP)
 
             # Initial map status:
@@ -956,14 +989,14 @@ class ViveTrackerGroup():
 
             # Got MAP_STATUS: 0,6 = mapped and tracking
         elif data[0:3] == ACK_POWER_OFF:
-            print(f".  Got POWER_OFF. ({mac_str(device_addr)})")
+            verbose_print(f".  Got POWER_OFF. ({mac_str(device_addr)})")
             comms.handle_disconnected(mac_to_idx(device_addr))
         elif data[0:3] == ACK_RESET:
-            print(f".  Got RESET ({mac_str(device_addr)}).")
+            verbose_print(f".  Got RESET ({mac_str(device_addr)}).")
             comms.handle_disconnected(mac_to_idx(device_addr))
         else:
-            print(f"   Got ACK ({mac_str(device_addr)}):", data, "(", data_raw, ")")
-        print("")
+            verbose_print(f"   Got ACK ({mac_str(device_addr)}):", data, "(", data_raw, ")")
+        verbose_print("")
 
 
     def get_map_state(self, device_addr):
@@ -991,12 +1024,17 @@ class ViveTrackerGroup():
         if not self.pose_listeners:
             return
 
+        tracker_slot = mac_to_idx(mac)
+        if tracker_slot not in self._active_tracker_slots:
+            self._active_tracker_slots.append(tracker_slot)
+        contiguous_index = self._active_tracker_slots.index(tracker_slot)
+
         sample = {
-            "tracker_index": idx,
+            "tracker_index": contiguous_index,
             "mac": bytes(mac),
             "buttons": buttons,
             "tracking_status": tracking_status,
-            "timestamp_ms": self.pose_time[mac_to_idx(mac)],
+            "timestamp_ms": self.pose_time[tracker_slot],
             "position": np.array(pos_arr, dtype=np.float32),
             "rotation": np.array(rot_arr, dtype=np.float32),
             "acceleration": np.array(acc_arr, dtype=np.float32),
@@ -1007,7 +1045,7 @@ class ViveTrackerGroup():
             try:
                 listener(sample)
             except Exception as exc:
-                print(f"Pose listener raised {exc}")
+                verbose_print(f"Pose listener raised {exc}")
 
 if __name__ == '__main__':
     trackers = ViveTrackerGroup()

@@ -2,13 +2,8 @@ import pathlib
 import sys
 
 import pygame
-from numpy import array
 from math import cos, sin
 import numpy as np
-
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 from pyvut import ViveTrackerGroup
 
@@ -92,7 +87,7 @@ class Physical:
         :param vertices: a tuple of points (each has 3 coordinates)
         :param edges: a tuple of pairs (each pair is a set containing 2 vertices' indexes)
         """
-        self.__vertices = array(vertices)
+        self.__vertices = np.array(vertices)
         self.__edges = tuple(edges)
         self.__rotation = np.array([0, 0, 0, 1])  # radians around each axis
         self.__pos = np.array([0,0,0])

@@ -8,7 +8,7 @@ from .tracker_core import (
     mac_str,
     mac_to_idx,
 )
-from .api import TrackerPose, UltimateTrackerAPI
+from .api import TrackerPose, UltimateTrackerAPI, TrackerService
 
 __all__ = [
     "DongleHID",
