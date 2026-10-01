@@ -143,8 +143,15 @@ class UltimateTrackerAPI:
         mode: str = "DONGLE_USB",
         poll_interval: float = 0.001,
         wifi_info_path: Optional[str] = None,
+        host_slot: Optional[int] = None,
+        all_hosts: bool = False,
+        keep_map: bool = False,
+        host_mode_delay: float = 0.0,
     ) -> None:
-        self._group = ViveTrackerGroup(mode=mode, wifi_info_path=wifi_info_path)
+        self._group = ViveTrackerGroup(
+            mode=mode, wifi_info_path=wifi_info_path, host_slot=host_slot, all_hosts=all_hosts,
+            keep_map=keep_map, host_mode_delay=host_mode_delay,
+        )
         self._poll_interval = max(0.0, poll_interval)
         self._pose_callbacks: List[PoseCallback] = []
         self._latest_pose: Dict[int, TrackerPose] = {}

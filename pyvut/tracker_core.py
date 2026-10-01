@@ -65,6 +65,25 @@ def verbose_print(*args, **kwargs):
 #Unpaired 23:30:42:b7:82:d3, 0x1
 # Unpaired 23:32:fd:c2:7b:cd, 0x1
 
+# Last AP a SLAM host reported (WIFI_HOST_SSID). With keep_map the host keeps running
+# that AP but doesn't report it again, so clients get these cached credentials.
+HOST_AP_CACHE = Path.home() / ".cache" / "pyvut" / "last_host_ap.json"
+
+def load_host_ap_cache():
+    try:
+        with HOST_AP_CACHE.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+def save_host_ap_cache(ssid, passwd, freq):
+    try:
+        HOST_AP_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        with HOST_AP_CACHE.open("w", encoding="utf-8") as f:
+            json.dump({"ssid": ssid, "pass": passwd, "freq": freq}, f)
+    except OSError as exc:
+        verbose_print(f"Couldn't save host AP cache: {exc}")
+
 def current_milli_time():
     return round(time.time() * 1000)
 
@@ -156,7 +175,7 @@ class Ackable(object):
 
 class DongleHID(Ackable):
 
-    def __init__(self, wifi_info_path=None):
+    def __init__(self, wifi_info_path=None, open_pairing=False, host_slot=None, all_hosts=False, keep_map=False, host_mode_delay=0.0):
         self.calib_1 = ""
         self.calib_2 = ""
         self.device_macs = []
@@ -164,7 +183,25 @@ class DongleHID(Ackable):
         self.num_paired = 0
         self.device_hid1 = None
         self.current_host_id = -1
+        # Dongle slot to make the SLAM host; None = first tracker we hear from
+        self.host_slot = host_slot
+        # Every tracker runs as its own SLAM host (independent maps/frames, no map sharing)
+        self.all_hosts = all_hosts
+        self.host_slots = set()
+        # Skip the tracking-mode -1 reset for hosts, so they can reuse a stored map
+        # (e.g. one built in VIVE Streaming Hub) instead of starting a fresh one
+        self.keep_map = keep_map
+        # Seconds to wait between the tracking mode reset and the host mode, instead of
+        # sending them back to back; slot -> time the host mode is due
+        self.host_mode_delay = host_mode_delay
+        self.pending_host_mode = {}
         self.tick_periodic = 0
+        # MACs we've sent the role/tracking-mode setup ACKs to
+        self.initialized_macs = set()
+        # slot -> device ID sent via ACK_NEW_ID; host is 0, clients must be unique and != 0
+        self.device_ids = {}
+        # client slots that asked for Wi-Fi credentials before the host reported them
+        self.wifi_pending = set()
 
         self.pose_callback = None
         self.ack_callback = None
@@ -180,6 +217,13 @@ class DongleHID(Ackable):
         self.host_ssid = ""
         self.host_passwd = ""
         self.host_freq = ""
+        if keep_map:
+            cached_ap = load_host_ap_cache()
+            if cached_ap:
+                verbose_print(f"Using cached host AP {cached_ap['ssid']} for clients")
+                self.host_ssid = cached_ap["ssid"]
+                self.host_passwd = cached_ap["pass"]
+                self.host_freq = cached_ap["freq"]
 
         device_list = hid.enumerate(VID_VIVE, PID_DONGLE)
         verbose_print(device_list)
@@ -203,8 +247,12 @@ class DongleHID(Ackable):
         # hex_dump(self.send_cmd(0x21, [0])) # bricked my dongle :(
 
         # 0x1D = ReportRequestRFChangeBehavior?
+        # The 5 trailing bytes are per-slot flags. Opening pairing on a slot resets it and
+        # drops the tracker paired there, so this is opt-in (scripts/pair_trackers.py pairs
+        # only unconnected slots). Already-paired trackers reconnect without it.
         bEnabled = 1
-        verbose_print(self.send_cmd(DCMD_REQUEST_RF_CHANGE_BEHAVIOR, struct.pack("<BBBBBBB", RF_BEHAVIOR_PAIR_DEVICE, bEnabled, 1, 1, 1, 0, 0))) # PairDevice
+        if open_pairing:
+            verbose_print(self.send_cmd(DCMD_REQUEST_RF_CHANGE_BEHAVIOR, struct.pack("<BBBBBBB", RF_BEHAVIOR_PAIR_DEVICE, bEnabled, 1, 1, 1, 0, 0))) # PairDevice
         #verbose_print(self.send_cmd(DCMD_REQUEST_RF_CHANGE_BEHAVIOR, struct.pack("<BBBBBBB", RF_BEHAVIOR_RX_POWER_SAVING, bEnabled, 1, 0, 0, 0, 0))) # RxPowerSaving?
         #verbose_print(self.send_cmd(DCMD_REQUEST_RF_CHANGE_BEHAVIOR, struct.pack("<BBBBBB", RF_BEHAVIOR_RESTART_RF, 1, 0, 0, 0, 0))) # Same as 1 w/ bEnabled
         # 3 = SetLpf (7,8,9,10), not available
@@ -318,7 +366,7 @@ class DongleHID(Ackable):
         return self.send_cmd(DCMD_F4, out_data)
 
     def is_host(self, device_addr):
-        return mac_to_idx(device_addr) == self.current_host_id
+        return mac_to_idx(device_addr) in self.host_slots
 
     def is_client(self, device_addr):
         return not self.is_host(device_addr)
@@ -395,14 +443,89 @@ class DongleHID(Ackable):
             return
         if idx == self.current_host_id:
             self.current_host_id = -1
+        self.host_slots.discard(idx)
 
+        self.initialized_macs = {m for m in self.initialized_macs if mac_to_idx(m) != idx}
+        self.device_ids.pop(idx, None)
+        self.wifi_pending.discard(idx)
         self.connected_to_host[idx] = False
         self.has_host_map[idx] = False
 
         if self.disconnected_callback:
             self.disconnected_callback(self, idx)
 
+    def restart_slam(self, slot):
+        """Re-send the role/tracking-mode setup to one tracker, which makes it drop its
+        current map and start a fresh one. Returns False if no tracker is known in that slot."""
+        macs = [m for m in self.initialized_macs if mac_to_idx(m) == slot]
+        if not macs:
+            return False
+        self.init_tracker(macs[0])
+        return True
+
+    def init_tracker(self, paired_mac):
+        paired_mac_str = mac_str(paired_mac)
+        self.initialized_macs.add(bytes(paired_mac))
+
+        # I really wish they included the index of each tracker *somewhere*, but it seems
+        # like the MACs have always been fake anyhow
+        self.ack_set_role_id(mac_to_idx(paired_mac), 1)
+
+        # TODO: detect re-pairs and force re-init
+
+        #if self.num_paired <= 1:
+        if self.all_hosts:
+            make_host = True
+        elif self.host_slot is not None:
+            make_host = mac_to_idx(paired_mac) == self.host_slot
+        else:
+            make_host = self.current_host_id == -1 or self.is_host(paired_mac)
+
+        if make_host and self.keep_map:
+            verbose_print(f"Keeping stored map on {paired_mac_str} (skipping tracking mode reset)")
+        else:
+            self.ack_set_tracking_mode(mac_to_idx(paired_mac), -1)
+
+        if make_host:
+            test_mode = TRACKING_MODE_SLAM_HOST
+            self.current_host_id = mac_to_idx(paired_mac)
+            self.host_slots.add(mac_to_idx(paired_mac))
+            verbose_print(f"Making {paired_mac_str} the SLAM host")
+            self.wifi_set_country(mac_to_idx(paired_mac), self.wifi_info["country"])
+            self.ack_set_tracking_host(mac_to_idx(paired_mac), 1)
+            self.ack_set_wifi_host(mac_to_idx(paired_mac), 1)
+            self.device_ids[mac_to_idx(paired_mac)] = 0
+            self.ack_set_new_id(mac_to_idx(paired_mac), 0)
+        else:
+            test_mode = TRACKING_MODE_SLAM_CLIENT
+            #self.wifi_connect(mac_to_idx(paired_mac))
+            # Upstream used the slot number, which collides with the host's ID 0 when a
+            # client sits in slot 0 and the host doesn't.
+            slot = mac_to_idx(paired_mac)
+            used = {v for k, v in self.device_ids.items() if k != slot}
+            new_id = next(i for i in range(1, 6) if i not in used)
+            self.device_ids[slot] = new_id
+
+            self.ack_set_tracking_host(mac_to_idx(paired_mac), 0)
+            self.ack_set_wifi_host(mac_to_idx(paired_mac), 0)
+            self.ack_set_new_id(mac_to_idx(paired_mac), new_id)
+
+        if make_host and self.host_mode_delay > 0 and not self.keep_map:
+            verbose_print(f"Delaying host tracking mode on {paired_mac_str} by {self.host_mode_delay}s")
+            self.pending_host_mode[mac_to_idx(paired_mac)] = time.time() + self.host_mode_delay
+        else:
+            self.ack_set_tracking_mode(mac_to_idx(paired_mac), test_mode)
+
+    def send_pending_host_modes(self):
+        now = time.time()
+        for slot, due in list(self.pending_host_mode.items()):
+            if now >= due:
+                verbose_print(f"Sending delayed host tracking mode to slot {slot}")
+                self.ack_set_tracking_mode(slot, TRACKING_MODE_SLAM_HOST)
+                del self.pending_host_mode[slot]
+
     def do_loop(self):
+        self.send_pending_host_modes()
         resp = self.device_hid1.read(0x400)
         if len(resp) <= 0:
             return
@@ -429,35 +552,11 @@ class DongleHID(Ackable):
             self.calib_2 = ""
 
             if is_unpair:
+                self.initialized_macs.discard(bytes(paired_mac))
                 self.handle_disconnected(mac_to_idx(paired_mac))
                 return
 
-            # I really wish they included the index of each tracker *somewhere*, but it seems
-            # like the MACs have always been fake anyhow
-            self.ack_set_role_id(mac_to_idx(paired_mac), 1)
-            self.ack_set_tracking_mode(mac_to_idx(paired_mac), -1)
-
-            # TODO: detect re-pairs and force re-init
-            
-            #if self.num_paired <= 1:
-            if self.current_host_id == -1 or self.is_host(paired_mac):
-                test_mode = TRACKING_MODE_SLAM_HOST
-                self.current_host_id = mac_to_idx(paired_mac)
-                verbose_print(f"Making {paired_mac_str} the SLAM host")
-                self.wifi_set_country(mac_to_idx(paired_mac), self.wifi_info["country"])
-                self.ack_set_tracking_host(mac_to_idx(paired_mac), 1)
-                self.ack_set_wifi_host(mac_to_idx(paired_mac), 1)
-                self.ack_set_new_id(mac_to_idx(paired_mac), 0)
-            else:
-                test_mode = TRACKING_MODE_SLAM_CLIENT
-                #self.wifi_connect(mac_to_idx(paired_mac))
-                new_id = int(mac_to_idx(paired_mac))
-
-                self.ack_set_tracking_host(mac_to_idx(paired_mac), 0)
-                self.ack_set_wifi_host(mac_to_idx(paired_mac), 0)
-                self.ack_set_new_id(mac_to_idx(paired_mac), new_id)
-
-            self.ack_set_tracking_mode(mac_to_idx(paired_mac), test_mode)
+            self.init_tracker(paired_mac)
 
             
         elif resp[0] == DRESP_TRACKER_RF_STATUS or resp[0] == DRESP_TRACKER_NEW_RF_STATUS or resp[0] == 0x29:
@@ -469,6 +568,12 @@ class DongleHID(Ackable):
             else:
                 hex_dump(data_ret)
         elif resp[0] == DRESP_TRACKER_INCOMING:
+            # Trackers that were already connected before we started never send a
+            # pair event, so set them up the first time we hear from them.
+            device_addr = bytes(resp[3:9])
+            if device_addr not in self.initialized_macs:
+                verbose_print(f"Initializing already-connected tracker {mac_str(device_addr)}")
+                self.init_tracker(device_addr)
             self.parse_tracker_incoming(resp)
             #self.send_raw(bytes([0]) + resp)
 
@@ -505,7 +610,7 @@ class DongleHID(Ackable):
                     #self.wifi_set_password(i, self.wifi_info["pass"])
                     #self.wifi_set_country(i, self.wifi_info["country"])
                     
-                    if i != self.current_host_id:
+                    if not self.is_host(i):
                         self.ack_lambda_ask_status(i, KEY_RECEIVED_HOST_ED)
                         self.ack_lambda_ask_status(i, KEY_RECEIVED_HOST_MAP)
                     
@@ -691,7 +796,7 @@ class TrackerHID(Ackable):
 
 class ViveTrackerGroup():
 
-    def __init__(self, mode="DONGLE_USB", wifi_info_path=None, debug=True):
+    def __init__(self, mode="DONGLE_USB", wifi_info_path=None, debug=True, host_slot=None, all_hosts=False, keep_map=False, host_mode_delay=0.0):
         set_tracker_core_verbose(debug)
         self.poses_recvd = [0]*5
         self.pose_quat = [[0.0, 0.0, 0.0, 1.0]] * 5
@@ -703,6 +808,11 @@ class ViveTrackerGroup():
         #self.wip_pose_btns = [0]*5
 
         self.tracker_map_state = [0]*5
+        # slot -> {SLAM key id: last reported value}, from LAMBDA_PROP_GET_STATUS replies
+        self.slam_status = {}
+        # slot -> serial suffix, taken from the host AP name (DIRECT-xx-<serial suffix>).
+        # Slots and MACs change on re-pairing; the serial identifies the physical tracker.
+        self.tracker_serials = {}
         self.stuck_on_static = [0]*5
         self.stuck_on_exists = [0]*5
         self.stuck_on_not_checked = [0]*5
@@ -714,7 +824,8 @@ class ViveTrackerGroup():
 
         # TODO: mix of multiple?
         if mode == "DONGLE_USB":
-            self.comms = DongleHID(wifi_info_path=wifi_info_path)
+            self.comms = DongleHID(wifi_info_path=wifi_info_path, host_slot=host_slot, all_hosts=all_hosts, keep_map=keep_map,
+                                   host_mode_delay=host_mode_delay)
         elif mode == "TRACKER_USB":
             self.comms = TrackerHID(wifi_info_path=wifi_info_path)
 
@@ -924,6 +1035,7 @@ class ViveTrackerGroup():
                 elif key_id == KEY_CURRENT_TRACKING_STATE:
                     addendum = f"({pose_status_to_str(state)})"
 
+                self.slam_status.setdefault(mac_to_idx(device_addr), {})[key_id] = state
                 verbose_print(f"   Status returned for SLAM key {slam_key_to_str(key_id)} ({mac_str(device_addr)}): {state} {addendum}")
 
             else:
@@ -954,14 +1066,22 @@ class ViveTrackerGroup():
             comms.host_ssid = ssid
             comms.host_passwd = passwd
             comms.host_freq = freq
+            save_host_ap_cache(ssid, passwd, freq)
+            self.tracker_serials[mac_to_idx(device_addr)] = ssid.rsplit("-", 1)[-1]
+
+            # Clients that asked before the host reported its AP got empty credentials
+            pending = getattr(comms, "wifi_pending", set())
+            for idx in sorted(pending):
+                verbose_print(f"   Sending host Wi-Fi to waiting client slot {idx}")
+                self.send_host_wifi(comms, idx)
+            pending.clear()
         elif data[0:2] == ACK_WIFI_SSID_PASS:
             verbose_print(f"   Got WIFI_SSID ACK ({mac_str(device_addr)})")
 
-            comms.wifi_set_ssid(mac_to_idx(device_addr), comms.host_ssid)
-            comms.wifi_set_password(mac_to_idx(device_addr), comms.host_passwd)
-            #comms.wifi_set_ssid_password(mac_to_idx(device_addr), comms.host_ssid, comms.host_passwd)
-            comms.wifi_set_freq(mac_to_idx(device_addr), comms.host_freq)
-            comms.wifi_set_country(mac_to_idx(device_addr), comms.wifi_info["country"])
+            if comms.host_ssid:
+                self.send_host_wifi(comms, mac_to_idx(device_addr))
+            elif hasattr(comms, "wifi_pending"):
+                comms.wifi_pending.add(mac_to_idx(device_addr))
         elif data[0:2] == ACK_WIFI_CONNECT:
             ret = int(data[2:])
             verbose_print(f"   Got WIFI_CONNECT ACK ({mac_str(device_addr)}): {ret}")
@@ -998,6 +1118,13 @@ class ViveTrackerGroup():
             verbose_print(f"   Got ACK ({mac_str(device_addr)}):", data, "(", data_raw, ")")
         verbose_print("")
 
+
+    def send_host_wifi(self, comms, idx):
+        comms.wifi_set_ssid(idx, comms.host_ssid)
+        comms.wifi_set_password(idx, comms.host_passwd)
+        #comms.wifi_set_ssid_password(idx, comms.host_ssid, comms.host_passwd)
+        comms.wifi_set_freq(idx, comms.host_freq)
+        comms.wifi_set_country(idx, comms.wifi_info["country"])
 
     def get_map_state(self, device_addr):
         return self.tracker_map_state[mac_to_idx(device_addr)]
