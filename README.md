@@ -23,7 +23,69 @@ Do the initial SLAM map construction on Windows with SteamVR + VIVE Streaming Hu
 - Python 3.x plus the `hid`, `numpy`, and `pygame` packages (`pip install hid numpy pygame`).
 - HID dependency note: this code imports `hid` (not `hidapi`). On Debian/Ubuntu install `libhidapi-hidraw0` and `libhidapi-libusb0` (e.g., `sudo apt install libhidapi-hidraw0 libhidapi-libusb0`) before `pip install hid` so the native bindings build.
 - Permissions: Ubuntu users may need udev rules so HID devices are accessible without `sudo`; for quick tests you can run `sudo chmod a+r /dev/hidraw${NUM}` on the device path printed by `hid_test.py` or `rf_hid_test.py`.
-- Wi-Fi setup: edit `pyvut/wifi_info.json` with the SSID, password, country, and frequency you want the SLAM host tracker to broadcast; this step is required when you operate multiple trackers so they can sync over the host AP.
+- Wi-Fi setup: set your country code in `pyvut/wifi_info.json`. The SLAM host tracker creates its own AP (`DIRECT-xx-<serial>`) and pyvut forwards its credentials to the clients; the SSID/password fields are not used.
+
+## Getting started with the wireless dongle
+
+This is the path that has been tested end to end: three trackers on one dongle, one
+shared map, all trackers in one coordinate frame (tracker firmware 1.0.999.178, dongle
+ROM 0909.0000.0000.0917).
+
+1. **Build the map on Windows** as described above. Pair the trackers to the same dongle
+   you will use on Linux; they stay paired, so there is nothing to pair on Linux.
+   The tracker that was host during mapping stores the map; note its serial (shown in
+   Streaming Hub, and on Linux as the end of its AP name `DIRECT-xx-<serial>`).
+2. **Install** pyvut with the viewer extra (`pip install -e .[viewer]`) and give your
+   user access to the dongle, e.g. with a udev rule
+   (`/etc/udev/rules.d/70-vive-tracker.rules`):
+   ```
+   SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0bb4", TAG+="uaccess"
+   ```
+   then `sudo udevadm control --reload-rules && sudo udevadm trigger` and replug.
+3. **Set your Wi-Fi country** in `pyvut/wifi_info.json` (`"country": "DE"`, `"US"`, ...).
+   Only the country is used; the host tracker creates its own AP and pyvut passes its
+   credentials to the clients.
+4. **Switch on the host tracker first** (the one holding the map), then the others. The
+   first tracker pyvut hears from becomes the SLAM host (or pick a slot with
+   `--host-slot`).
+5. **Run** `python scripts/mujoco_viewer.py`. Hold each tracker at chest height facing the
+   mapped area, keep it still for a few seconds, then move it slowly. Lying on a desk it
+   will not relocalize.
+   - Host: `MAP_STATUS -1,1` (map exists) -> `0,6` (`MAP_REUSE_OK`) -> tracking.
+   - Clients: `MAP_STATUS 0,1` (got the host map) -> `0,6` -> tracking in the host's frame.
+6. **Pairing new trackers**: `python scripts/pair_trackers.py`, then hold a tracker's
+   power button until it flashes blue quickly. pyvut no longer opens pairing on startup,
+   because the pair request resets the flagged dongle slots.
+
+Tracking status in pose packets: `2` = position + rotation, `3` = rotation only,
+`4` = recently lost (position frozen). `0x10` is set on top while the tracker lies still
+(e.g. `18` = OK). `scripts/identify_trackers.py` shows which slot a physical tracker is in.
+
+### How pyvut sets the trackers up
+
+By default pyvut sends the same setup as VIVE Streaming Hub, decoded from USB captures
+of Streaming Hub talking to the dongle. After a tracker's device info dump ends (`NAZZ`):
+
+| | ACKs |
+|---|---|
+| every tracker | `ANI<slot>` `ATW` `ACF60` `ATS<unix time>` `Wc<country>` `ACF60` `pAS_TS0` `FW2` |
+| host | `ATM21`; if it hasn't reported its AP yet, `FW2` + `WH` after its next `LP` |
+| client | `ATM11`; on its `WS` request: `Wc` `Wf<freq>` `Ws<ssid>` `Wt<rest>` `Wp<pass>` `FW1` |
+
+Streaming Hub's map wizard sends `AHT1,1,1,1`, `FW2`, `Wc..`, `ATM20`, then `pMS_SC`,
+`pMS_ILA`, `pMS_IHA`, `pMS_ES` and finally `ALE` (end map) to the host. pyvut doesn't
+drive the wizard; build the map in Streaming Hub.
+
+Options (`UltimateTrackerAPI` arguments / script flags):
+- `host_slot` / `--host-slot N`: make the tracker in dongle slot N the host.
+- `all_hosts` / `--all-hosts`: every tracker is its own host with its own map and frame;
+  the viewer's K key fits the frames onto one reference tracker.
+- `legacy_init` / `--legacy-init`: pyvut's earlier setup (`ARI`, `ATM-1`, `ATH`, `AWH`,
+  `ATM20`, status polling); with it clients never received the host map.
+
+Known open points: the host drops to status 4 more often than the clients; restarting
+SLAM on a slot (viewer keys 0-4) with the default setup is untested; meanings of `FW`,
+`pAS_TS0`, `AHT` and the host's `p83`/`p94` messages are guesses or unknown.
 
 ## Quick Start Cheatsheet
 
@@ -38,9 +100,9 @@ Do the initial SLAM map construction on Windows with SteamVR + VIVE Streaming Hu
 3. Example RF control and pairing helpers live near the bottom (e.g., `send_rf_command(0x1D, ...)`). Avoid flash/write opcodes unless you are prepared for risky behavior.
 
 ### pyvut package (`pyvut/`)
-1. Update Wi-Fi credentials in `pyvut/wifi_info.json`.
-2. Pair trackers with the dongle; the pyvut helper auto-selects the first tracker as SLAM host.
-3. `python pyvut/tracker_core.py` streams ACK/status traffic, auto-sends SLAM role and Wi-Fi ACKs, and keeps pose state for up to five trackers.
+1. Set your Wi-Fi country in `pyvut/wifi_info.json`.
+2. Pair trackers with the dongle (`scripts/pair_trackers.py`); the first tracker pyvut hears from becomes the SLAM host.
+3. `python -m pyvut.tracker_core` streams ACK/status traffic, sends the tracker setup and Wi-Fi ACKs, and keeps pose state for up to five trackers.
 4. `python scripts/visualize_pygame.py` renders simple 3D markers for live position/orientation; close the window to exit.
 
 ## Install as a Package
@@ -91,6 +153,9 @@ with UltimateTrackerAPI(mode="DONGLE_USB") as api:
 	- `clear_maps.sh`: adb helper to wipe `/data/lambda` and `/data/mapdata` on a tracker.
 	- `enums_*.py`: command and response constants (USB HID, RF, Wi-Fi, status, ACKs, dongle commands).
 - `scripts/visualize_pygame.py`: lightweight pygame visualizer for up to 5 trackers.
+- `scripts/mujoco_viewer.py`: MuJoCo 3D viewer with trails and a per-tracker status panel (`pip install -e .[viewer]`).
+- `scripts/pair_trackers.py`: open pairing only on dongle slots without a connected tracker.
+- `scripts/identify_trackers.py`: rotate a tracker to see which dongle slot it is in.
 - `scripts/stream_poses.py`: CLI demo that prints pose samples via `UltimateTrackerAPI`.
 - `ota_parse.py`: extracts and CRC-checks partitions from HTC OTA firmware images (`trackers/firmware/TX_FW.ota`).
 - `how-to-use.md`: this README distilled version; keep it handy for detailed background.
@@ -111,7 +176,7 @@ with UltimateTrackerAPI(mode="DONGLE_USB") as api:
 - `DongleHID` pairs trackers, assigns SLAM host/role, forwards ACKs, and maintains Wi-Fi credentials.
 - `TrackerHID` offers a direct USB transport option (`ViveTrackerGroup(mode="TRACKER_USB")`).
 - `ViveTrackerGroup` keeps arrays of poses and exposes `get_pos(idx)`/`get_rot(idx)` for consumers.
-- SLAM/map helpers react to ACKs (`ACK_MAP_STATUS`, `ACK_LAMBDA_STATUS`, etc.) by requesting or ending maps when trackers get stuck.
+- SLAM/map state from the trackers' `MS`/`LS` ACKs is tracked per slot (`tracker_map_state`); with `legacy_init=True` pyvut also polls SLAM status and nudges stuck clients.
 
 ## OTA Parsing (`ota_parse.py`)
 
