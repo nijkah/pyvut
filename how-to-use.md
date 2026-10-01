@@ -43,9 +43,9 @@ Core flow lives in `pyvut/tracker_core.py`:
 - `ViveTrackerGroup` glues either transport together, maintains pose state arrays, and exposes `get_pos(idx)` / `get_rot(idx)` for consumers.
 
 Using the helpers with the dongle:
-1) Update `pyvut/wifi_info.json` with your Wi‑Fi details (host SSID/password/country/frequency).  
-2) Pair trackers with the dongle (the script listens for pair events and picks the first tracker as SLAM host).  
-3) Run `python pyvut/tracker_core.py` to print live ACK/status traffic; it will auto-send SLAM role/host/Wi‑Fi ACKs.  
+1) Set your Wi‑Fi country in `pyvut/wifi_info.json` (only the country is used; the host tracker runs its own AP).  
+2) Pair trackers with the dongle (`scripts/pair_trackers.py`); pyvut picks the first tracker it hears from as SLAM host.  
+3) Run `python -m pyvut.tracker_core` to print live ACK/status traffic; it sends the Streaming Hub tracker setup and Wi‑Fi ACKs. See "Getting started with the wireless dongle" in README.md.  
 4) For a quick visualization, run `python scripts/visualize_pygame.py`. Cubes are drawn for up to 5 trackers; orientation/position update in real time. Close the window to exit.
 
 Using the helpers over direct USB instead of the dongle:

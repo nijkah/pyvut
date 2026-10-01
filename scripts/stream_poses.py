@@ -47,6 +47,34 @@ def main() -> None:
         dest="wifi_info",
         help="Optional path to a wifi_info.json file (defaults to pyvut/wifi_info.json).",
     )
+    parser.add_argument(
+        "--host-slot",
+        type=int,
+        default=None,
+        help="Dongle slot (0-4) of the tracker to use as SLAM host; default is the first tracker heard from.",
+    )
+    parser.add_argument(
+        "--all-hosts",
+        action="store_true",
+        help="Run every tracker as its own SLAM host (independent coordinate frames).",
+    )
+    parser.add_argument(
+        "--keep-map",
+        action="store_true",
+        help="Don't reset the host's tracking mode on startup, so it can reuse a stored map (--legacy-init only; "
+             "the Streaming Hub setup never resets it).",
+    )
+    parser.add_argument(
+        "--host-mode-delay",
+        type=float,
+        default=0.0,
+        help="Seconds to wait between the host's tracking mode reset and its host mode (ignored with --keep-map; --legacy-init only).",
+    )
+    parser.add_argument(
+        "--legacy-init",
+        action="store_true",
+        help="Use pyvut's original tracker setup instead of the VIVE Streaming Hub sequence.",
+    )
     args = parser.parse_args()
 
     def on_pose(pose: TrackerPose) -> None:
@@ -57,7 +85,7 @@ def main() -> None:
         " Trackers emit raw (w,z,y,x) order but pyvut normalizes this for you. Press Ctrl+C to stop."
     )
     try:
-        with UltimateTrackerAPI(mode=args.mode, wifi_info_path=args.wifi_info) as api:
+        with UltimateTrackerAPI(mode=args.mode, wifi_info_path=args.wifi_info, host_slot=args.host_slot, all_hosts=args.all_hosts, keep_map=args.keep_map, host_mode_delay=args.host_mode_delay, legacy_init=args.legacy_init) as api:
             api.add_pose_callback(on_pose)
             while True:
                 time.sleep(1)

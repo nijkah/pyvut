@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 visualizer = ["pygame>=2.5"]
+viewer = ["mujoco>=3.0"]
 
 [project.urls]
 Homepage = "https://github.com/nijkah/pyvut"
