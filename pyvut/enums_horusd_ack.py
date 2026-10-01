@@ -56,6 +56,11 @@ ACK_WIFI_HOST_SSID = "WH"
 
 ACK_FT_KEEPALIVE = "FK"
 ACK_FW = "FW" # TODO
+# FW values Streaming Hub sends (meaning guessed from the order it sends them in):
+# FW2 right before every ATM / WH request, FW1 after a client's Wi-Fi credentials.
+# Hub never sends FW0.
+FW_HUB_SETUP = 2
+FW_HUB_WIFI_DONE = 1
 ACK_FILE_DOWNLOAD = "FD"
 
 # ACK_CATEGORY_PLAYER
@@ -63,6 +68,15 @@ ACK_LAMBDA_SET_STATUS = "P61:"
 ACK_LAMBDA_ASK_STATUS = "P63:"
 ACK_LAMBDA_COMMAND = "P64:"
 ACK_LAMBDA_MESSAGE = "P82:" # PR?
+# Lowercase "p" messages seen in Streaming Hub captures
+ACK_AS_TS = "pAS_TS" # sent as pAS_TS0 during setup, meaning unknown
+# Map wizard steps, sent to the host in this order, then ACK_END_MAP. The host
+# reports progress as p94:0:<state>:<progress> meanwhile.
+ACK_MAP_SCAN_START = "pMS_SC"
+ACK_MAP_SCAN_LOW = "pMS_ILA" # guess: lower area
+ACK_MAP_SCAN_HIGH = "pMS_IHA" # guess: higher area
+ACK_MAP_SCAN_END = "pMS_ES"
+ACK_AHT = "AHT" # sent as AHT1,1,1,1 right before the wizard switches the host to ATM20
 
 LAMBDA_PROP_DEVICE_CONNECTED = 58 # 0x3a
 LAMBDA_PROP_GET_STATUS = 61
@@ -87,6 +101,13 @@ ERROR_CAMERA_SSR_1 = 1121
 ERROR_CAMERA_SSR_2 = 1122
 ERROR_NO_IMU = 1200
 ERROR_NO_POSE = 1300
+ERROR_NAMES = {
+    ERROR_NO_CAMERA: "no camera",
+    ERROR_CAMERA_SSR_1: "camera SSR 1",
+    ERROR_CAMERA_SSR_2: "camera SSR 2",
+    ERROR_NO_IMU: "no IMU",
+    ERROR_NO_POSE: "no pose",
+}
 
 # ACK_LAMBDA_MESSAGE
 LAMBDA_MESSAGE_ERROR = 0

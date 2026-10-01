@@ -147,10 +147,11 @@ class UltimateTrackerAPI:
         all_hosts: bool = False,
         keep_map: bool = False,
         host_mode_delay: float = 0.0,
+        legacy_init: bool = False,
     ) -> None:
         self._group = ViveTrackerGroup(
             mode=mode, wifi_info_path=wifi_info_path, host_slot=host_slot, all_hosts=all_hosts,
-            keep_map=keep_map, host_mode_delay=host_mode_delay,
+            keep_map=keep_map, host_mode_delay=host_mode_delay, legacy_init=legacy_init,
         )
         self._poll_interval = max(0.0, poll_interval)
         self._pose_callbacks: List[PoseCallback] = []

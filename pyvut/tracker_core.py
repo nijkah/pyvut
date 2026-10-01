@@ -111,6 +111,10 @@ def do_u8_checksum(data):
         out ^= data[i]
     return out
 
+def is_legacy(comms):
+    # TrackerHID (direct USB) has no Streaming Hub setup and keeps the old behaviour
+    return getattr(comms, "legacy_init", True)
+
 # Base class which implements ACK commands
 class Ackable(object):
 
@@ -130,12 +134,12 @@ class Ackable(object):
     #def wifi_set_ssid_password(self, idx, ssid, passwd):
     #    self.send_ack_to(idx, f"{ACK_WIFI_SSID_PASS}{ssid},{passwd}")
 
-    def wifi_set_ssid(self, idx, ssid):
-        verbose_print(ssid[:8])
-        self._wifi_set_ssid_full(idx, ssid[:8])
-        for i in range(8, len(ssid), 8):
-            verbose_print(ssid[i:i+8])
-            self._wifi_set_ssid_append(idx, ssid[i:i+8])
+    def wifi_set_ssid(self, idx, ssid, chunk=8):
+        verbose_print(ssid[:chunk])
+        self._wifi_set_ssid_full(idx, ssid[:chunk])
+        for i in range(chunk, len(ssid), chunk):
+            verbose_print(ssid[i:i+chunk])
+            self._wifi_set_ssid_append(idx, ssid[i:i+chunk])
 
     def _wifi_set_ssid_full(self, idx, ssid):
         self.send_ack_to(idx, ACK_WIFI_SSID_FULL + ssid)
@@ -175,7 +179,8 @@ class Ackable(object):
 
 class DongleHID(Ackable):
 
-    def __init__(self, wifi_info_path=None, open_pairing=False, host_slot=None, all_hosts=False, keep_map=False, host_mode_delay=0.0):
+    def __init__(self, wifi_info_path=None, open_pairing=False, host_slot=None, all_hosts=False, keep_map=False, host_mode_delay=0.0,
+                 legacy_init=False):
         self.calib_1 = ""
         self.calib_2 = ""
         self.device_macs = []
@@ -195,10 +200,23 @@ class DongleHID(Ackable):
         # sending them back to back; slot -> time the host mode is due
         self.host_mode_delay = host_mode_delay
         self.pending_host_mode = {}
+        # legacy_init: the original pyvut setup (ARI/ATM-1/ATH/AWH/ATM20, FW0 broadcast,
+        # status polling). Default is the sequence VIVE Streaming Hub sends, decoded from
+        # USB captures; keep_map and host_mode_delay only apply to the legacy setup.
+        self.legacy_init = legacy_init
+        # MACs that paired but haven't finished their device info dump (NAZZ) yet;
+        # Streaming Hub sends the setup only after NAZZ
+        self.awaiting_azz = set()
+        # host slots that reported their AP (WH), and those we've asked for it
+        self.host_ap_reported = set()
+        self.host_ap_requested = set()
+        # slots that got the Streaming Hub setup since they connected
+        self.setup_sent = set()
         self.tick_periodic = 0
         # MACs we've sent the role/tracking-mode setup ACKs to
         self.initialized_macs = set()
-        # slot -> device ID sent via ACK_NEW_ID; host is 0, clients must be unique and != 0
+        # slot -> device ID sent via ACK_NEW_ID. Streaming Hub setup: the slot number.
+        # Legacy setup: host 0, clients unique and != 0.
         self.device_ids = {}
         # client slots that asked for Wi-Fi credentials before the host reported them
         self.wifi_pending = set()
@@ -281,13 +299,13 @@ class DongleHID(Ackable):
     def parse_tracker_status(self, data):
         unk, data_len = struct.unpack("<BB", data[:2])
         #verbose_print(f"unk: {hex(unk)} data_len: {hex(data_len)}")
-        hex_dump(data[:2])
         data = data[2:2+data_len]
-        hex_dump(data[0:1])
         data = data[1:]
         pair_state = [0,0,0,0,0]
         unk, pair_state[0],pair_state[1],pair_state[2],pair_state[3],pair_state[4],  = struct.unpack("<HLLLLL", data)
-        verbose_print(hex(unk),hex(pair_state[0]),hex(pair_state[1]),hex(pair_state[2]),hex(pair_state[3]),hex(pair_state[4]))
+        # Repeats every 10 s; only print changes
+        if pair_state != self.pair_state:
+            verbose_print("Pair states:", " ".join(hex(p) for p in pair_state))
 
         self.pair_state = pair_state
 
@@ -448,6 +466,10 @@ class DongleHID(Ackable):
         self.initialized_macs = {m for m in self.initialized_macs if mac_to_idx(m) != idx}
         self.device_ids.pop(idx, None)
         self.wifi_pending.discard(idx)
+        self.awaiting_azz = {m for m in self.awaiting_azz if mac_to_idx(m) != idx}
+        self.host_ap_reported.discard(idx)
+        self.host_ap_requested.discard(idx)
+        self.setup_sent.discard(idx)
         self.connected_to_host[idx] = False
         self.has_host_map[idx] = False
 
@@ -460,10 +482,76 @@ class DongleHID(Ackable):
         macs = [m for m in self.initialized_macs if mac_to_idx(m) == slot]
         if not macs:
             return False
-        self.init_tracker(macs[0])
+        if self.legacy_init:
+            self.init_tracker(macs[0])
+        else:
+            # Streaming Hub never does this; reset the mode, then repeat its setup
+            self.ack_set_tracking_mode(slot, -1)
+            self.send_hub_setup(slot)
         return True
 
-    def init_tracker(self, paired_mac):
+    def pick_host(self, paired_mac):
+        if self.all_hosts:
+            return True
+        if self.host_slot is not None:
+            return mac_to_idx(paired_mac) == self.host_slot
+        return self.current_host_id == -1 or self.is_host(paired_mac)
+
+    def init_tracker(self, paired_mac, send_now=True):
+        """Assign the tracker its role. With the Streaming Hub setup, send_now=False defers
+        the setup ACKs until the tracker's NAZZ (see device_info_done)."""
+        if self.legacy_init:
+            return self.legacy_init_tracker(paired_mac)
+
+        self.initialized_macs.add(bytes(paired_mac))
+        slot = mac_to_idx(paired_mac)
+        if self.pick_host(paired_mac):
+            self.current_host_id = slot
+            self.host_slots.add(slot)
+            verbose_print(f"Making {mac_str(paired_mac)} the SLAM host")
+        else:
+            self.host_slots.discard(slot)
+        # Streaming Hub gives every tracker, host included, its slot number as device ID
+        self.device_ids[slot] = slot
+
+        if send_now:
+            self.awaiting_azz.discard(bytes(paired_mac))
+            self.send_hub_setup(slot)
+        else:
+            self.awaiting_azz.add(bytes(paired_mac))
+
+    def device_info_done(self, device_addr):
+        """Tracker sent NAZZ, the end of its device info dump."""
+        if bytes(device_addr) not in self.initialized_macs:
+            self.init_tracker(device_addr, send_now=False)
+        self.awaiting_azz.discard(bytes(device_addr))
+        self.send_hub_setup(mac_to_idx(device_addr))
+
+    def send_hub_setup(self, slot):
+        """The ACKs Streaming Hub sends each tracker after its NAZZ, in the same order."""
+        is_host = slot in self.host_slots
+        verbose_print(f"Sending Streaming Hub setup to slot {slot} as {'host' if is_host else 'client'}")
+        self.setup_sent.add(slot)
+        self.ack_set_new_id(slot, slot)
+        self.send_ack_to(slot, ACK_ATW)
+        self.send_ack_to(slot, f"{ACK_CAMERA_FPS}60")
+        self.send_ack_to(slot, f"{ACK_TIME_SET}{int(time.time())}")
+        self.wifi_set_country(slot, self.wifi_info["country"])
+        self.send_ack_to(slot, f"{ACK_CAMERA_FPS}60")
+        self.send_ack_to(slot, f"{ACK_AS_TS}0")
+        self.send_ack_to(slot, f"{ACK_FW}{FW_HUB_SETUP}")
+        self.ack_set_tracking_mode(slot, TRACKING_MODE_HUB_HOST if is_host else TRACKING_MODE_SLAM_CLIENT)
+
+    def request_host_ap(self, slot):
+        """Ask a host for its AP credentials (it answers with WH), once per connection."""
+        # The LP inside the device info dump comes before the setup; Hub asks after it
+        if slot not in self.setup_sent or slot in self.host_ap_reported or slot in self.host_ap_requested:
+            return
+        self.host_ap_requested.add(slot)
+        self.send_ack_to(slot, f"{ACK_FW}{FW_HUB_SETUP}")
+        self.send_ack_to(slot, ACK_WIFI_HOST_SSID)
+
+    def legacy_init_tracker(self, paired_mac):
         paired_mac_str = mac_str(paired_mac)
         self.initialized_macs.add(bytes(paired_mac))
 
@@ -556,24 +644,25 @@ class DongleHID(Ackable):
                 self.handle_disconnected(mac_to_idx(paired_mac))
                 return
 
-            self.init_tracker(paired_mac)
+            # Device info (ending in NAZZ) follows the pair event; Streaming Hub waits for it
+            self.init_tracker(paired_mac, send_now=False)
 
             
         elif resp[0] == DRESP_TRACKER_RF_STATUS or resp[0] == DRESP_TRACKER_NEW_RF_STATUS or resp[0] == 0x29:
-            verbose_print(f"dump for {hex(resp[0])}:")
-            #hex_dump(resp)
             cmd_ret, data_ret = self.parse_incoming(resp)
             if resp[0] == DRESP_TRACKER_RF_STATUS or resp[0] == DRESP_TRACKER_NEW_RF_STATUS:
                 self.parse_tracker_status(data_ret)
-            else:
-                hex_dump(data_ret)
+            # 0x29 comes per tracker every ~8 s with changing counters (link stats?); not printed
         elif resp[0] == DRESP_TRACKER_INCOMING:
             # Trackers that were already connected before we started never send a
             # pair event, so set them up the first time we hear from them.
             device_addr = bytes(resp[3:9])
             if device_addr not in self.initialized_macs:
                 verbose_print(f"Initializing already-connected tracker {mac_str(device_addr)}")
-                self.init_tracker(device_addr)
+                # If we caught it in the middle of its device info dump, NAZZ will follow
+                type_maybe = struct.unpack("<H", resp[9:11])[0]
+                in_info_dump = type_maybe == 0x101 and resp[12:13] in (b"C", b"c", b"N")
+                self.init_tracker(device_addr, send_now=not in_info_dump)
             self.parse_tracker_incoming(resp)
             #self.send_raw(bytes([0]) + resp)
 
@@ -588,6 +677,9 @@ class DongleHID(Ackable):
             #self.send_ack_to_all(ACK_LAMBDA_ASK_STATUS + f"{KEY_CURRENT_MAP_ID}")
             
             self.tick_periodic += 1
+            # Streaming Hub never polls; the trackers push MS/LS by themselves
+            if self.tick_periodic > 1000 and not self.legacy_init:
+                self.tick_periodic = 0
             if self.tick_periodic > 1000:
                 verbose_print("Tick!")
                 #self.send_ack_to_all(ACK_LAMBDA_MESSAGE + "1:0")
@@ -796,7 +888,8 @@ class TrackerHID(Ackable):
 
 class ViveTrackerGroup():
 
-    def __init__(self, mode="DONGLE_USB", wifi_info_path=None, debug=True, host_slot=None, all_hosts=False, keep_map=False, host_mode_delay=0.0):
+    def __init__(self, mode="DONGLE_USB", wifi_info_path=None, debug=True, host_slot=None, all_hosts=False, keep_map=False, host_mode_delay=0.0,
+                 legacy_init=False):
         set_tracker_core_verbose(debug)
         self.poses_recvd = [0]*5
         self.pose_quat = [[0.0, 0.0, 0.0, 1.0]] * 5
@@ -825,7 +918,7 @@ class ViveTrackerGroup():
         # TODO: mix of multiple?
         if mode == "DONGLE_USB":
             self.comms = DongleHID(wifi_info_path=wifi_info_path, host_slot=host_slot, all_hosts=all_hosts, keep_map=keep_map,
-                                   host_mode_delay=host_mode_delay)
+                                   host_mode_delay=host_mode_delay, legacy_init=legacy_init)
         elif mode == "TRACKER_USB":
             self.comms = TrackerHID(wifi_info_path=wifi_info_path)
 
@@ -865,7 +958,6 @@ class ViveTrackerGroup():
         self.tracker_map_state[mac_to_idx(device_addr)] = state
 
         if self.stuck_on_static[mac_to_idx(device_addr)] > 7:
-            verbose_print("ok we're stuck, end the map again")
             self.bump_map_once_2[mac_to_idx(device_addr)] = True
             self.stuck_on_static[mac_to_idx(device_addr)] = 0
 
@@ -879,8 +971,7 @@ class ViveTrackerGroup():
             #comms.send_ack_to(mac_to_idx(device_addr), ACK_LAMBDA_COMMAND + f"{RESET_MAP}")
             self.stuck_on_static[mac_to_idx(device_addr)] += 1
             if self.bump_map_once_2[mac_to_idx(device_addr)]:
-                if comms.is_client(device_addr):
-                    verbose_print("End the map?")
+                #if comms.is_client(device_addr):
                     #comms.lambda_end_map(comms.current_host_id)
                     #comms.lambda_end_map(device_addr)
                     #comms.send_ack_to(comms.current_host_id, ACK_LAMBDA_COMMAND + f"{ASK_MAP}")
@@ -893,15 +984,15 @@ class ViveTrackerGroup():
             self.stuck_on_static[mac_to_idx(device_addr)] = 0
 
         if state == MAP_EXIST:
-            if self.stuck_on_exists[mac_to_idx(device_addr)] == 0:# and comms.is_host(device_addr):
-                verbose_print("ok we're stuck on exists, end the map again")
-                #comms.lambda_end_map(device_addr)
+            #if self.stuck_on_exists[mac_to_idx(device_addr)] == 0 and comms.is_host(device_addr):
+            #    comms.lambda_end_map(device_addr)
             self.stuck_on_exists[mac_to_idx(device_addr)] += 1
         else:
             self.stuck_on_exists[mac_to_idx(device_addr)] = 0
 
         if state == MAP_NOT_CHECKED:
-            if self.stuck_on_not_checked[mac_to_idx(device_addr)] == 0 and comms.is_client(device_addr) and comms.client_has_host_map(device_addr):
+            if (self.stuck_on_not_checked[mac_to_idx(device_addr)] == 0 and is_legacy(comms) and comms.is_client(device_addr)
+                    and comms.client_has_host_map(device_addr)):
                 verbose_print("ok we're stuck on not checked, end the map again")
                 comms.lambda_end_map(device_addr)
             self.stuck_on_not_checked[mac_to_idx(device_addr)] += 1
@@ -915,6 +1006,10 @@ class ViveTrackerGroup():
         if len(data) == 0x2:
             idx, btns = struct.unpack("<BB", data)
             verbose_print(f"({mac_str(mac)})", hex(idx), "btns:", hex(btns))
+            return
+
+        if len(data) == 0x4:
+            # Sent before a tracker has a pose (also seen under Streaming Hub); idx, btns + 2 unknown bytes
             return
 
         if len(data) != 0x25 and len(data) != 0x27:
@@ -948,7 +1043,10 @@ class ViveTrackerGroup():
             self.last_pose_btns[mac_to_idx(mac)] = self.pose_btns[mac_to_idx(mac)]
             self.pose_btns[mac_to_idx(mac)] = btns | self.pose_btns[mac_to_idx(mac)] & 0xFF00
 
-        if (self.pose_btns[mac_to_idx(mac)] & 0x100) == 0x100 and (self.last_pose_btns[mac_to_idx(mac)] & 0x100) == 0x0:# and comms.get_map_state(mac) == MAP_EXIST:
+        # Streaming Hub doesn't end the map on a button press, and a stray press would save
+        # a half-built map; legacy only (the viewer's M key still ends the map)
+        if (is_legacy(comms) and (self.pose_btns[mac_to_idx(mac)] & 0x100) == 0x100
+                and (self.last_pose_btns[mac_to_idx(mac)] & 0x100) == 0x0):# and comms.get_map_state(mac) == MAP_EXIST:
             verbose_print("end map.")
             comms.lambda_end_map(mac)
 
@@ -978,7 +1076,9 @@ class ViveTrackerGroup():
             verbose_print(f"   Got device info ACK ({mac_str(device_addr)}):", data_real[:3])
 
             # Handle post-deviceinfo commands
-            if data_real[0:3] == ACK_AZZ:
+            if data_real[0:3] == ACK_AZZ and not is_legacy(comms):
+                comms.device_info_done(device_addr)
+            elif data_real[0:3] == ACK_AZZ:
                 if comms.is_host(device_addr):
                     #comms.lambda_end_map(device_addr)
                     pass
@@ -1043,11 +1143,15 @@ class ViveTrackerGroup():
         elif data[0:2] == ACK_LAMBDA_PROPERTY:
             data_real = data[2:]
             verbose_print(f"   Got LP ACK ({mac_str(device_addr)}):", data_real)
+            # Streaming Hub asks a host that hasn't reported its AP yet right after its LP
+            if not is_legacy(comms) and comms.is_host(device_addr):
+                comms.request_host_ap(mac_to_idx(device_addr))
         elif data[0:2] == ACK_LAMBDA_STATUS:
             data_real = data[2:]
             a, b, c = [int(s) for s in data_real.split(",")]
             verbose_print(f"   Got LAMBDA_STATUS ACK ({mac_str(device_addr)}): {a},{b},{c}")
-            comms.send_ack_to_all(ACK_FW + "0")
+            if is_legacy(comms):
+                comms.send_ack_to_all(ACK_FW + "0")
             if b != 2:
                 #verbose_print("ask for host map.")
                 #comms.send_ack_to(mac_to_idx(device_addr), ACK_LAMBDA_COMMAND + f"{ASK_ED}")
@@ -1055,11 +1159,15 @@ class ViveTrackerGroup():
                 #comms.send_ack_to(mac_to_idx(device_addr), ACK_LAMBDA_COMMAND + f"{KF_SYNC}")
                 pass
                 
-        elif data[0:4] == ACK_ERROR_CODE:
-            data_real = data[4:]
-            verbose_print(f"   Got ERROR ({mac_str(device_addr)}):", data_real)
+        elif data[0:3] == ACK_ERROR_CODE:
+            data_real = data[3:]
+            name = ERROR_NAMES.get(int(data_real), "unknown") if data_real.isdigit() else "unknown"
+            verbose_print(f"   Got ERROR ({mac_str(device_addr)}): {data_real} ({name})")
         elif data[0:2] == ACK_WIFI_HOST_SSID:
             data_real = data[2:]
+            if data_real.count(",") != 2:
+                verbose_print(f"   Got WIFI_HOST_SSID ACK without AP ({mac_str(device_addr)}): {data_real!r}")
+                return
             ssid, passwd, freq = data_real.split(",")
             verbose_print(f"   Got WIFI_HOST_SSID ACK ({mac_str(device_addr)}): ssid={ssid}, pass={passwd}, freq={freq}")
 
@@ -1067,6 +1175,8 @@ class ViveTrackerGroup():
             comms.host_passwd = passwd
             comms.host_freq = freq
             save_host_ap_cache(ssid, passwd, freq)
+            if hasattr(comms, "host_ap_reported"):
+                comms.host_ap_reported.add(mac_to_idx(device_addr))
             self.tracker_serials[mac_to_idx(device_addr)] = ssid.rsplit("-", 1)[-1]
 
             # Clients that asked before the host reported its AP got empty credentials
@@ -1120,6 +1230,14 @@ class ViveTrackerGroup():
 
 
     def send_host_wifi(self, comms, idx):
+        if not is_legacy(comms):
+            # Streaming Hub's order: country, freq, SSID (13 chars + rest), password, FW1
+            comms.wifi_set_country(idx, comms.wifi_info["country"])
+            comms.wifi_set_freq(idx, comms.host_freq)
+            comms.wifi_set_ssid(idx, comms.host_ssid, chunk=13)
+            comms.wifi_set_password(idx, comms.host_passwd)
+            comms.send_ack_to(idx, f"{ACK_FW}{FW_HUB_WIFI_DONE}")
+            return
         comms.wifi_set_ssid(idx, comms.host_ssid)
         comms.wifi_set_password(idx, comms.host_passwd)
         #comms.wifi_set_ssid_password(idx, comms.host_ssid, comms.host_passwd)

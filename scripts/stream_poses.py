@@ -61,13 +61,19 @@ def main() -> None:
     parser.add_argument(
         "--keep-map",
         action="store_true",
-        help="Don't reset the host's tracking mode on startup, so it can reuse a stored map.",
+        help="Don't reset the host's tracking mode on startup, so it can reuse a stored map (--legacy-init only; "
+             "the Streaming Hub setup never resets it).",
     )
     parser.add_argument(
         "--host-mode-delay",
         type=float,
         default=0.0,
-        help="Seconds to wait between the host's tracking mode reset and its host mode (ignored with --keep-map).",
+        help="Seconds to wait between the host's tracking mode reset and its host mode (ignored with --keep-map; --legacy-init only).",
+    )
+    parser.add_argument(
+        "--legacy-init",
+        action="store_true",
+        help="Use pyvut's original tracker setup instead of the VIVE Streaming Hub sequence.",
     )
     args = parser.parse_args()
 
@@ -79,7 +85,7 @@ def main() -> None:
         " Trackers emit raw (w,z,y,x) order but pyvut normalizes this for you. Press Ctrl+C to stop."
     )
     try:
-        with UltimateTrackerAPI(mode=args.mode, wifi_info_path=args.wifi_info, host_slot=args.host_slot, all_hosts=args.all_hosts, keep_map=args.keep_map, host_mode_delay=args.host_mode_delay) as api:
+        with UltimateTrackerAPI(mode=args.mode, wifi_info_path=args.wifi_info, host_slot=args.host_slot, all_hosts=args.all_hosts, keep_map=args.keep_map, host_mode_delay=args.host_mode_delay, legacy_init=args.legacy_init) as api:
             api.add_pose_callback(on_pose)
             while True:
                 time.sleep(1)
